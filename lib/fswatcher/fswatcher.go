@@ -346,6 +346,7 @@ func (w *fsWatcher) actOnTimer() {
 		// shorten next notifyDelay accordingly.
 		duration := time.Since(timeBeforeSending)
 		buffer := time.Duration(1) * time.Millisecond
+		l.Debugln(w, "%v Resetting timer via channel after sending %d fs events", w, len(oldFsEvents))
 		switch {
 		case duration < w.notifyDelay/10:
 			w.resetNotifyTimerChan <- w.notifyDelay
@@ -354,6 +355,7 @@ func (w *fsWatcher) actOnTimer() {
 		default:
 			w.resetNotifyTimerChan <- w.notifyDelay - duration
 		}
+		l.Debugln(w, "%v Sent to timer reset channel after sending %d fs events", w, len(oldFsEvents))
 	}()
 	return
 }
