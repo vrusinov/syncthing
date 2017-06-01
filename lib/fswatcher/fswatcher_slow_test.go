@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -379,6 +380,12 @@ type expectedBatch struct {
 
 func testScenario(t *testing.T, name string, testCase func(watcher Service), expectedBatches []expectedBatch) {
 	createTestDir(t, ".")
+
+	if runtime.GOOS == "darwin" {
+		// Tests pick up the previously created files/dirs, probably because
+		// they get flushed to disked with a delay.
+		sleepMs(5000)
+	}
 
 	fsWatcher := testFsWatcher(t, name)
 
