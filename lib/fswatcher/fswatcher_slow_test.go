@@ -95,7 +95,7 @@ func TestRename(t *testing.T) {
 	var expectedBatches []expectedBatch
 	// Only on these platforms the removed file can be differentiated from
 	// the created file during renaming
-	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
 		expectedBatches = []expectedBatch{
 			expectedBatch{[]string{newfile}, 900, 1900},
 			expectedBatch{[]string{oldfile}, 3900, 5000},
@@ -407,7 +407,7 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 	// Tests pick up the previously created files/dirs, probably because
 	// they get flushed to disked with a delay.
 	initDelayMs := 500
-	if runtime.GOOS == "darwin" || runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" {
 		initDelayMs = 1000
 	}
 	sleepMs(initDelayMs)
