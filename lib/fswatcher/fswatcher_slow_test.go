@@ -42,6 +42,12 @@ const (
 	testNotifyTimeout = time.Duration(3) * time.Second
 )
 
+type expectedBatch struct {
+	paths    []string
+	afterMs  int
+	beforeMs int
+}
+
 // TestTemplate illustrates how a test can be created.
 // It also checks some basic operations like file creation, deletion and folder
 // creation, and behaviour like reactivating timer on new event
@@ -396,19 +402,13 @@ func compareBatchToExpected(t *testing.T, batch []string, expectedPaths []string
 	}
 }
 
-type expectedBatch struct {
-	paths    []string
-	afterMs  int
-	beforeMs int
-}
-
 func testScenario(t *testing.T, name string, testCase func(watcher Service), expectedBatches []expectedBatch) {
 	createTestDir(t, ".")
 
 	if runtime.GOOS == "darwin" {
 		// Tests pick up the previously created files/dirs, probably because
 		// they get flushed to disked with a delay.
-		sleepMs(5000)
+		sleepMs(500)
 	}
 
 	fsWatcher := testFsWatcher(t, name)
@@ -423,8 +423,9 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 	sleepMs(10)
 	go testFsWatcherOutput(t, fsWatcher.C(), expectedBatches, startTime, abort)
 
+	timeout := time.NewTimer(time.Duration(expectedBatches[len(expectedBatches)-1].beforeMs+100) * time.Millisecond)
 	testCase(fsWatcher)
-	sleepMs(1100)
+	<-timeout.C
 
 	abort <- struct{}{}
 	fsWatcher.Stop()

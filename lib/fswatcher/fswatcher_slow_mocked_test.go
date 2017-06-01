@@ -208,8 +208,9 @@ func testScenarioMocked(t *testing.T, name string, testCase func(chan<- notify.E
 	sleepMs(10)
 	go testFsWatcherOutput(t, fsWatcher.notifyModelChan, expectedBatches, startTime, abort)
 
+	timeout := time.NewTimer(time.Duration(expectedBatches[len(expectedBatches)-1].beforeMs+100) * time.Millisecond)
 	testCase(fsWatcher.fsEventChan)
-	sleepMs(1100)
+	<-timeout.C
 
 	abort <- struct{}{}
 	fsWatcher.Stop()
