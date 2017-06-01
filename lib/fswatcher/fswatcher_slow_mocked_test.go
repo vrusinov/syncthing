@@ -27,7 +27,7 @@ func TestDelayMockedBackend(t *testing.T) {
 		sleepMs(200)
 		delay := time.Duration(300) * time.Millisecond
 		timer := time.NewTimer(delay)
-		for i := 0; i < 14; i++ {
+		for i := 0; i < 13; i++ {
 			<-timer.C
 			timer.Reset(delay)
 			sendEvent(t, c, file)
@@ -38,7 +38,7 @@ func TestDelayMockedBackend(t *testing.T) {
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
 		expectedBatch{[]string{file}, 3900, 5500},
-		expectedBatch{[]string{file}, 4900, 7000},
+		expectedBatch{[]string{file}, 4900, 6500},
 	}
 
 	testScenarioMocked(t, "Delay", testCase, expectedBatches)

@@ -297,7 +297,7 @@ func TestInProgress(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"notinprogress"}, 2000, 4000},
+		expectedBatch{[]string{"notinprogress"}, 2000, 3500},
 	}
 
 	testScenario(t, "TestInProgress", testCase, expectedBatches)
