@@ -125,7 +125,7 @@ func TestAggregate(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{parent}, 900, 2000},
+		expectedBatch{[]string{parent}, 900, 1500},
 	}
 
 	testScenario(t, "Aggregate", testCase, expectedBatches)
@@ -151,7 +151,7 @@ func TestAggregateParent(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{parent}, 900, 2000},
+		expectedBatch{[]string{parent}, 900, 1500},
 	}
 
 	testScenario(t, "AggregateParent", testCase, expectedBatches)
@@ -171,7 +171,7 @@ func TestRootAggregate(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"."}, 900, 2000},
+		expectedBatch{[]string{"."}, 900, 1500},
 	}
 
 	testScenario(t, "RootAggregate", testCase, expectedBatches)
@@ -215,7 +215,7 @@ func TestOverflow(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"."}, 900, 2000},
+		expectedBatch{[]string{"."}, 900, 1500},
 	}
 
 	testScenario(t, "Overflow", testCase, expectedBatches)
@@ -272,7 +272,7 @@ func TestUpdateIgnores(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"afile"}, 900, 2000},
+		expectedBatch{[]string{"afile"}, 900, 1500},
 	}
 
 	testScenario(t, "UpdateIgnores", testCase, expectedBatches)
