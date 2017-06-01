@@ -403,7 +403,13 @@ func compareBatchToExpected(t *testing.T, batch []string, expectedPaths []string
 func testScenario(t *testing.T, name string, testCase func(watcher Service), expectedBatches []expectedBatch) {
 	createTestDir(t, ".")
 
-	sleepMs(500)
+	// Tests pick up the previously created files/dirs, probably because
+	// they get flushed to disked with a delay.
+	initDelayMs = 500
+	if runtime.GOOS == "darwin" {
+		initDelayMs = 1000
+	}
+	sleepMs(initDelayMs)
 
 	fsWatcher := testFsWatcher(t, name)
 
