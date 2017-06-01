@@ -88,6 +88,7 @@ func TestRename(t *testing.T) {
 	newfile := "newfile"
 
 	testCase := func(watcher Service) {
+		sleepMs(400)
 		renameTestFile(t, oldfile, newfile)
 	}
 
@@ -232,7 +233,7 @@ func TestOutside(t *testing.T) {
 	}
 	createTestFile(t, "dir/file")
 	testCase := func(watcher Service) {
-		sleepMs(100)
+		sleepMs(400)
 		if err := os.Rename(filepath.Join(testDir, dir), filepath.Join(outDir, dir)); err != nil {
 			panic(err)
 		}

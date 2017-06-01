@@ -24,6 +24,7 @@ var folderRoot = filepath.Clean("/home/someuser/syncthing")
 func TestDelayMockedBackend(t *testing.T) {
 	file := "file"
 	testCase := func(c chan<- notify.EventInfo) {
+		sleepMs(200)
 		delay := time.Duration(300) * time.Millisecond
 		timer := time.NewTimer(delay)
 		for i := 0; i < 14; i++ {
