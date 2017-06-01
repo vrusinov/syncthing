@@ -43,8 +43,8 @@ const (
 )
 
 // TestTemplate illustrates how a test can be created.
-// It also checkes some basic operations like file creation, deletion, renaming
-// and folder creation and behaviour like reactivating timer on new event
+// It also checks some basic operations like file creation, deletion and folder
+// creation, and behaviour like reactivating timer on new event
 func TestTemplate(t *testing.T) {
 	// create dirs/files that should exist before FS watching
 	oldfile := createTestFile(t, "oldfile")
@@ -53,15 +53,14 @@ func TestTemplate(t *testing.T) {
 	file1 := "file1"
 	file2 := "dir1/file2"
 	dir1 := "dir1"
-	newfile := "newfile"
 	testCase := func(watcher Service) {
 		// test timer reactivation
 		sleepMs(1100)
 		createTestFile(t, file1)
 		createTestDir(t, dir1)
 		sleepMs(1100)
-		renameTestFile(t, oldfile, newfile)
 		createTestFile(t, file2)
+		deleteTestFile(t, oldfile)
 		sleepMs(1000)
 		deleteTestFile(t, file1)
 		deleteTestDir(t, dir1)
@@ -71,12 +70,37 @@ func TestTemplate(t *testing.T) {
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
 		expectedBatch{[]string{file1, dir1}, 2000, 2500},
-		expectedBatch{[]string{file2, newfile}, 3000, 3500},
+		expectedBatch{[]string{file2}, 3000, 3500},
 		expectedBatch{[]string{oldfile}, 5400, 6500},
 		expectedBatch{[]string{file1, dir1}, 6400, 8000},
 	}
 
 	testScenario(t, "Template", testCase, expectedBatches)
+}
+
+func TestRename(t *testing.T) {
+	oldfile := createTestFile(t, "oldfile")
+	newfile := "newfile"
+
+	testCase := func(watcher Service) {
+		renameTestFile(t, oldfile, newfile)
+	}
+
+	var expectedBatches []expectedBatch
+	// Only on these platforms the removed file can be differentiated from
+	// the created file during renaming
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" {
+		expectedBatches = []expectedBatch{
+			expectedBatch{[]string{newfile}, 900, 1900},
+			expectedBatch{[]string{oldfile}, 3900, 5000},
+		}
+	} else {
+		expectedBatches = []expectedBatch{
+			expectedBatch{[]string{newfile, oldfile}, 3900, 5000},
+		}
+	}
+
+	testScenario(t, "Rename", testCase, expectedBatches)
 }
 
 // TestAggregate checks whether maxFilesPerDir+1 events in one dir are
