@@ -70,7 +70,6 @@ func TestTemplate(t *testing.T) {
 		sleepMs(1000)
 		deleteTestFile(t, file1)
 		deleteTestDir(t, dir1)
-		time.Sleep(testNotifyTimeout)
 	}
 
 	// batches that we expect to receive with time interval in milliseconds
@@ -240,7 +239,6 @@ func TestOutside(t *testing.T) {
 		if err := os.RemoveAll(outDir); err != nil {
 			panic(err)
 		}
-		time.Sleep(testNotifyTimeout)
 	}
 
 	// batches that we expect to receive with time interval in milliseconds
@@ -268,7 +266,7 @@ func TestUpdateIgnores(t *testing.T) {
 		watcher.UpdateIgnores(pats)
 		sleepMs(100)
 		deleteTestFile(t, "afile")
-		sleepMs(800)
+		sleepMs(2000)
 	}
 
 	// batches that we expect to receive with time interval in milliseconds
@@ -408,7 +406,7 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 	if runtime.GOOS == "darwin" {
 		// Tests pick up the previously created files/dirs, probably because
 		// they get flushed to disked with a delay.
-		sleepMs(500)
+		sleepMs(100)
 	}
 
 	fsWatcher := testFsWatcher(t, name)
