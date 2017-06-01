@@ -405,7 +405,7 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 
 	// Tests pick up the previously created files/dirs, probably because
 	// they get flushed to disked with a delay.
-	initDelayMs = 500
+	initDelayMs := 500
 	if runtime.GOOS == "darwin" {
 		initDelayMs = 1000
 	}
