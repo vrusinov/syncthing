@@ -10,14 +10,14 @@ package fswatcher
 
 import "github.com/zillode/notify"
 
-func (watcher *fsWatcher) eventMask() notify.Event {
-	events := notify.Create | FileModified | FileRenameFrom | FileDelete | FileRenameTo
-	if !watcher.ignorePerms {
+func (w *watcher) eventMask() notify.Event {
+	events := notify.Create | notify.FileModified | notify.FileRenameFrom | notify.FileDelete | notify.FileRenameTo
+	if !w.folderCfg.IgnorePerms {
 		events |= notify.FileAttrib
 	}
 	return events
 }
 
-func (watcher *fsWatcher) removeEventMask() notify.Event {
+func (w *watcher) removeEventMask() notify.Event {
 	return notify.FileDelete | notify.FileRenameFrom
 }

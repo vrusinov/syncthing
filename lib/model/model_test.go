@@ -25,8 +25,8 @@ import (
 	"github.com/d4l3k/messagediff"
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/db"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
-	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	srand "github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/scanner"
@@ -35,12 +35,14 @@ import (
 var device1, device2 protocol.DeviceID
 var defaultConfig *config.Wrapper
 var defaultFolderConfig config.FolderConfiguration
+var defaultFs fs.Filesystem
 
 func init() {
 	device1, _ = protocol.DeviceIDFromString("AIR6LPZ-7K4PTTV-UXQSMUU-CPQ5YWH-OEDFIIQ-JUG777G-2YQXXR5-YD6AWQR")
 	device2, _ = protocol.DeviceIDFromString("GYRZZQB-IRNPV4Z-T7TC52W-EQYJ3TT-FDQW6MW-DFLMU42-SSSU6EM-FBK2VAY")
+	defaultFs = fs.NewFilesystem(fs.FilesystemTypeBasic, "testdata")
 
-	defaultFolderConfig = config.NewFolderConfiguration("default", "testdata")
+	defaultFolderConfig = config.NewFolderConfiguration("default", fs.FilesystemTypeBasic, "testdata")
 	defaultFolderConfig.Devices = []config.FolderDeviceConfiguration{{DeviceID: device1}}
 	_defaultConfig := config.Configuration{
 		Folders: []config.FolderConfiguration{defaultFolderConfig},
@@ -88,7 +90,7 @@ func init() {
 func TestRequest(t *testing.T) {
 	db := db.OpenMemory()
 
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 
 	// device1 shares default, but device2 doesn't
 	m.AddFolder(defaultFolderConfig)
@@ -166,7 +168,7 @@ func BenchmarkIndex_100(b *testing.B) {
 
 func benchmarkIndex(b *testing.B, nfiles int) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -196,7 +198,7 @@ func BenchmarkIndexUpdate_10000_1(b *testing.B) {
 
 func benchmarkIndexUpdate(b *testing.B, nfiles, nufiles int) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -350,13 +352,31 @@ func (f *fakeConnection) addFile(name string, flags uint32, ftype protocol.FileI
 	f.fileData[name] = data
 }
 
+func (f *fakeConnection) deleteFile(name string) {
+	f.mut.Lock()
+	defer f.mut.Unlock()
+
+	for i, fi := range f.files {
+		if fi.Name == name {
+			fi.Deleted = true
+			fi.ModifiedS = time.Now().Unix()
+			fi.Version = fi.Version.Update(f.id.Short())
+			fi.Sequence = time.Now().UnixNano()
+			fi.Blocks = nil
+
+			f.files = append(append(f.files[:i], f.files[i+1:]...), fi)
+			return
+		}
+	}
+}
+
 func (f *fakeConnection) sendIndexUpdate() {
 	f.model.IndexUpdate(f.id, f.folder, f.files)
 }
 
 func BenchmarkRequestOut(b *testing.B) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 	defer m.Stop()
@@ -386,7 +406,7 @@ func BenchmarkRequestOut(b *testing.B) {
 
 func BenchmarkRequestInSingleFile(b *testing.B) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 	defer m.Stop()
@@ -426,7 +446,7 @@ func TestDeviceRename(t *testing.T) {
 	cfg := config.Wrap("tmpconfig.xml", rawCfg)
 
 	db := db.OpenMemory()
-	m := NewModel(cfg, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(cfg, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 
 	if cfg.Devices()[device1].Name != "" {
 		t.Errorf("Device already has a name")
@@ -495,14 +515,16 @@ func TestClusterConfig(t *testing.T) {
 	}
 	cfg.Folders = []config.FolderConfiguration{
 		{
-			ID: "folder1",
+			ID:   "folder1",
+			Path: "testdata",
 			Devices: []config.FolderDeviceConfiguration{
 				{DeviceID: device1},
 				{DeviceID: device2},
 			},
 		},
 		{
-			ID: "folder2",
+			ID:   "folder2",
+			Path: "testdata",
 			Devices: []config.FolderDeviceConfiguration{
 				{DeviceID: device1},
 				{DeviceID: device2},
@@ -512,7 +534,7 @@ func TestClusterConfig(t *testing.T) {
 
 	db := db.OpenMemory()
 
-	m := NewModel(config.Wrap("/tmp/test", cfg), protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(config.Wrap("/tmp/test", cfg), protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(cfg.Folders[0])
 	m.AddFolder(cfg.Folders[1])
 	m.ServeBackground()
@@ -586,7 +608,7 @@ func TestIntroducer(t *testing.T) {
 
 		wcfg := config.Wrap("/tmp/test", cfg)
 
-		m := NewModel(wcfg, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+		m := NewModel(wcfg, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 		for _, folder := range cfg.Folders {
 			m.AddFolder(folder)
 		}
@@ -604,13 +626,15 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 				},
@@ -653,14 +677,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 				},
@@ -708,14 +734,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
@@ -753,14 +781,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
@@ -798,14 +828,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 				},
@@ -854,14 +886,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2},
@@ -898,14 +932,16 @@ func TestIntroducer(t *testing.T) {
 		},
 		Folders: []config.FolderConfiguration{
 			{
-				ID: "folder1",
+				ID:   "folder1",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: device1},
 				},
 			},
 			{
-				ID: "folder2",
+				ID:   "folder2",
+				Path: "testdata",
 				Devices: []config.FolderDeviceConfiguration{
 					{DeviceID: device1},
 					{DeviceID: device2, IntroducedBy: protocol.LocalDeviceID},
@@ -953,14 +989,6 @@ func changeIgnores(t *testing.T, m *Model, expected []string) {
 
 	ignores = append(ignores, "pox")
 
-	if runtime.GOOS == "darwin" {
-		// Mac has seconds-only timestamp precision, which tricks the ignore
-		// system into thinking the file has not changed. Work around it in
-		// an ugly way...
-		time.Sleep(time.Second)
-	} else {
-		time.Sleep(time.Millisecond)
-	}
 	err = m.SetIgnores("default", ignores)
 	if err != nil {
 		t.Error(err)
@@ -1002,7 +1030,7 @@ func TestIgnores(t *testing.T) {
 	ioutil.WriteFile("testdata/.stignore", []byte(".*\nquux\n"), 0644)
 
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.ServeBackground()
 	defer m.Stop()
 
@@ -1010,6 +1038,14 @@ func TestIgnores(t *testing.T) {
 	// way to know when the folder is actually added.
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
+
+	// Reach in and update the ignore matcher to one that always does
+	// reloads when asked to, instead of checking file mtimes. This is
+	// because we will be changing the files on disk often enough that the
+	// mtimes will be unreliable to determine change status.
+	m.fmut.Lock()
+	m.folderIgnores["default"] = ignore.New(defaultFs, ignore.WithCache(true), ignore.WithChangeDetector(newAlwaysChanged()))
+	m.fmut.Unlock()
 
 	// Make sure the initial scan has finished (ScanFolders is blocking)
 	m.ScanFolders()
@@ -1032,7 +1068,7 @@ func TestIgnores(t *testing.T) {
 	}
 
 	// Invalid path, marker should be missing, hence returns an error.
-	m.AddFolder(config.FolderConfiguration{ID: "fresh", RawPath: "XXX"})
+	m.AddFolder(config.FolderConfiguration{ID: "fresh", Path: "XXX"})
 	_, _, err = m.GetIgnores("fresh")
 	if err == nil {
 		t.Error("No error")
@@ -1051,14 +1087,14 @@ func TestIgnores(t *testing.T) {
 
 func TestROScanRecovery(t *testing.T) {
 	ldb := db.OpenMemory()
-	set := db.NewFileSet("default", ldb)
+	set := db.NewFileSet("default", defaultFs, ldb)
 	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
 		{Name: "dummyfile"},
 	})
 
 	fcfg := config.FolderConfiguration{
 		ID:              "default",
-		RawPath:         "testdata/rotestfolder",
+		Path:            "testdata/rotestfolder",
 		Type:            config.FolderTypeSendOnly,
 		RescanIntervalS: 1,
 	}
@@ -1071,9 +1107,9 @@ func TestROScanRecovery(t *testing.T) {
 		},
 	})
 
-	os.RemoveAll(fcfg.RawPath)
+	os.RemoveAll(fcfg.Path)
 
-	m := NewModel(cfg, protocol.LocalDeviceID, "device", "syncthing", "dev", ldb, nil)
+	m := NewModel(cfg, protocol.LocalDeviceID, "syncthing", "dev", ldb, nil)
 	m.AddFolder(fcfg)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -1102,14 +1138,14 @@ func TestROScanRecovery(t *testing.T) {
 		return
 	}
 
-	os.Mkdir(fcfg.RawPath, 0700)
+	os.Mkdir(fcfg.Path, 0700)
 
 	if err := waitFor("folder marker missing"); err != nil {
 		t.Error(err)
 		return
 	}
 
-	fd, err := os.Create(filepath.Join(fcfg.RawPath, ".stfolder"))
+	fd, err := os.Create(filepath.Join(fcfg.Path, ".stfolder"))
 	if err != nil {
 		t.Error(err)
 		return
@@ -1121,14 +1157,14 @@ func TestROScanRecovery(t *testing.T) {
 		return
 	}
 
-	os.Remove(filepath.Join(fcfg.RawPath, ".stfolder"))
+	os.Remove(filepath.Join(fcfg.Path, ".stfolder"))
 
 	if err := waitFor("folder marker missing"); err != nil {
 		t.Error(err)
 		return
 	}
 
-	os.Remove(fcfg.RawPath)
+	os.Remove(fcfg.Path)
 
 	if err := waitFor("folder path missing"); err != nil {
 		t.Error(err)
@@ -1138,14 +1174,14 @@ func TestROScanRecovery(t *testing.T) {
 
 func TestRWScanRecovery(t *testing.T) {
 	ldb := db.OpenMemory()
-	set := db.NewFileSet("default", ldb)
+	set := db.NewFileSet("default", defaultFs, ldb)
 	set.Update(protocol.LocalDeviceID, []protocol.FileInfo{
 		{Name: "dummyfile"},
 	})
 
 	fcfg := config.FolderConfiguration{
 		ID:              "default",
-		RawPath:         "testdata/rwtestfolder",
+		Path:            "testdata/rwtestfolder",
 		Type:            config.FolderTypeSendReceive,
 		RescanIntervalS: 1,
 	}
@@ -1158,9 +1194,9 @@ func TestRWScanRecovery(t *testing.T) {
 		},
 	})
 
-	os.RemoveAll(fcfg.RawPath)
+	os.RemoveAll(fcfg.Path)
 
-	m := NewModel(cfg, protocol.LocalDeviceID, "device", "syncthing", "dev", ldb, nil)
+	m := NewModel(cfg, protocol.LocalDeviceID, "syncthing", "dev", ldb, nil)
 	m.AddFolder(fcfg)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -1189,14 +1225,14 @@ func TestRWScanRecovery(t *testing.T) {
 		return
 	}
 
-	os.Mkdir(fcfg.RawPath, 0700)
+	os.Mkdir(fcfg.Path, 0700)
 
 	if err := waitFor("folder marker missing"); err != nil {
 		t.Error(err)
 		return
 	}
 
-	fd, err := os.Create(filepath.Join(fcfg.RawPath, ".stfolder"))
+	fd, err := os.Create(filepath.Join(fcfg.Path, ".stfolder"))
 	if err != nil {
 		t.Error(err)
 		return
@@ -1208,14 +1244,14 @@ func TestRWScanRecovery(t *testing.T) {
 		return
 	}
 
-	os.Remove(filepath.Join(fcfg.RawPath, ".stfolder"))
+	os.Remove(filepath.Join(fcfg.Path, ".stfolder"))
 
 	if err := waitFor("folder marker missing"); err != nil {
 		t.Error(err)
 		return
 	}
 
-	os.Remove(fcfg.RawPath)
+	os.Remove(fcfg.Path)
 
 	if err := waitFor("folder path missing"); err != nil {
 		t.Error(err)
@@ -1225,7 +1261,7 @@ func TestRWScanRecovery(t *testing.T) {
 
 func TestGlobalDirectoryTree(t *testing.T) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 	defer m.Stop()
@@ -1477,7 +1513,7 @@ func TestGlobalDirectoryTree(t *testing.T) {
 
 func TestGlobalDirectorySelfFixing(t *testing.T) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 
@@ -1652,7 +1688,7 @@ func BenchmarkTree_100_10(b *testing.B) {
 
 func benchmarkTree(b *testing.B, n1, n2 int) {
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.ServeBackground()
 
@@ -1787,7 +1823,7 @@ func TestIssue3028(t *testing.T) {
 	// Create a model and default folder
 
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	defCfg := defaultFolderConfig.Copy()
 	defCfg.RescanIntervalS = 86400
 	m.AddFolder(defCfg)
@@ -1843,14 +1879,14 @@ func TestIssue3164(t *testing.T) {
 	f := protocol.FileInfo{
 		Name: "issue3164",
 	}
-	m := ignore.New(false)
+	m := ignore.New(defaultFs)
 	if err := m.Parse(bytes.NewBufferString("(?d)oktodelete"), ""); err != nil {
 		t.Fatal(err)
 	}
 
 	fl := sendReceiveFolder{
 		dbUpdates: make(chan dbUpdateJob, 1),
-		dir:       "testdata",
+		fs:        fs.NewFilesystem(fs.FilesystemTypeBasic, "testdata"),
 	}
 
 	fl.deleteDir(f, m)
@@ -1865,7 +1901,7 @@ func TestScanNoDatabaseWrite(t *testing.T) {
 	// something actually changed.
 
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -1937,7 +1973,7 @@ func TestIssue2782(t *testing.T) {
 	if err := os.RemoveAll(testDir); err != nil {
 		t.Skip(err)
 	}
-	if err := osutil.MkdirAll(testDir+"/syncdir", 0755); err != nil {
+	if err := os.MkdirAll(testDir+"/syncdir", 0755); err != nil {
 		t.Skip(err)
 	}
 	if err := ioutil.WriteFile(testDir+"/syncdir/file", []byte("hello, world\n"), 0644); err != nil {
@@ -1949,8 +1985,8 @@ func TestIssue2782(t *testing.T) {
 	defer os.RemoveAll(testDir)
 
 	db := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", db, nil)
-	m.AddFolder(config.NewFolderConfiguration("default", "~/"+testName+"/synclink/"))
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
+	m.AddFolder(config.NewFolderConfiguration("default", fs.FilesystemTypeBasic, "~/"+testName+"/synclink/"))
 	m.StartFolder("default")
 	m.ServeBackground()
 	defer m.Stop()
@@ -1967,7 +2003,7 @@ func TestIssue2782(t *testing.T) {
 func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 	dbi := db.OpenMemory()
 
-	files := db.NewFileSet("default", dbi)
+	files := db.NewFileSet("default", defaultFs, dbi)
 	files.Replace(device1, genFiles(1))
 	files.Replace(device2, genFiles(1))
 
@@ -1975,12 +2011,12 @@ func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 		t.Error("expected two devices")
 	}
 
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 
 	// Remote sequence is cached, hence need to recreated.
-	files = db.NewFileSet("default", dbi)
+	files = db.NewFileSet("default", defaultFs, dbi)
 
 	if len(files.ListDevices()) != 1 {
 		t.Error("Expected one device")
@@ -1990,7 +2026,7 @@ func TestIndexesForUnknownDevicesDropped(t *testing.T) {
 func TestSharedWithClearedOnDisconnect(t *testing.T) {
 	dbi := db.OpenMemory()
 
-	fcfg := config.NewFolderConfiguration("default", "testdata")
+	fcfg := config.NewFolderConfiguration("default", fs.FilesystemTypeBasic, "testdata")
 	fcfg.Devices = []config.FolderDeviceConfiguration{
 		{DeviceID: device1},
 		{DeviceID: device2},
@@ -2009,7 +2045,7 @@ func TestSharedWithClearedOnDisconnect(t *testing.T) {
 
 	wcfg := config.Wrap("/tmp/test", cfg)
 
-	m := NewModel(wcfg, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(wcfg, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(fcfg)
 	m.StartFolder(fcfg.ID)
 	m.ServeBackground()
@@ -2123,7 +2159,7 @@ func TestIssue3496(t *testing.T) {
 	// checks on the completion calculation stuff.
 
 	dbi := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -2196,7 +2232,7 @@ func TestIssue3496(t *testing.T) {
 
 func TestIssue3804(t *testing.T) {
 	dbi := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -2211,7 +2247,7 @@ func TestIssue3804(t *testing.T) {
 
 func TestIssue3829(t *testing.T) {
 	dbi := db.OpenMemory()
-	m := NewModel(defaultConfig, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(defaultFolderConfig)
 	m.StartFolder("default")
 	m.ServeBackground()
@@ -2229,7 +2265,7 @@ func TestNoRequestsFromPausedDevices(t *testing.T) {
 
 	dbi := db.OpenMemory()
 
-	fcfg := config.NewFolderConfiguration("default", "testdata")
+	fcfg := config.NewFolderConfiguration("default", fs.FilesystemTypeBasic, "testdata")
 	fcfg.Devices = []config.FolderDeviceConfiguration{
 		{DeviceID: device1},
 		{DeviceID: device2},
@@ -2248,7 +2284,7 @@ func TestNoRequestsFromPausedDevices(t *testing.T) {
 
 	wcfg := config.Wrap("/tmp/test", cfg)
 
-	m := NewModel(wcfg, protocol.LocalDeviceID, "device", "syncthing", "dev", dbi, nil)
+	m := NewModel(wcfg, protocol.LocalDeviceID, "syncthing", "dev", dbi, nil)
 	m.AddFolder(fcfg)
 	m.StartFolder(fcfg.ID)
 	m.ServeBackground()
@@ -2317,148 +2353,34 @@ func TestNoRequestsFromPausedDevices(t *testing.T) {
 	}
 }
 
-func TestRootedJoinedPath(t *testing.T) {
-	type testcase struct {
-		root   string
-		rel    string
-		joined string
-		ok     bool
+func TestFSWatcher(t *testing.T) {
+	db := db.OpenMemory()
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
+	m.ServeBackground()
+	defer m.Stop()
+
+	fcfg := defaultFolderConfig
+	fcfg.FSWatcherDelayS = 10
+	fcfg.FSWatcherEnabled = true
+
+	m.AddFolder(fcfg)
+	m.StartFolder("default")
+
+	m.fmut.RLock()
+	fsWatcher, okWatcher := m.folderFSWatchers["default"]
+	folderRunner, okFolder := m.folderRunners["default"]
+	m.fmut.RUnlock()
+	if !okWatcher {
+		t.Error("FSWatcher missing")
+	} else if fsWatcher == nil {
+		t.Error("m.folderFSWatcher[\"default\"] == nil")
 	}
-	cases := []testcase{
-		// Valid cases
-		{"foo", "bar", "foo/bar", true},
-		{"foo", "/bar", "foo/bar", true},
-		{"foo/", "bar", "foo/bar", true},
-		{"foo/", "/bar", "foo/bar", true},
-		{"baz/foo", "bar", "baz/foo/bar", true},
-		{"baz/foo", "/bar", "baz/foo/bar", true},
-		{"baz/foo/", "bar", "baz/foo/bar", true},
-		{"baz/foo/", "/bar", "baz/foo/bar", true},
-		{"foo", "bar/baz", "foo/bar/baz", true},
-		{"foo", "/bar/baz", "foo/bar/baz", true},
-		{"foo/", "bar/baz", "foo/bar/baz", true},
-		{"foo/", "/bar/baz", "foo/bar/baz", true},
-		{"baz/foo", "bar/baz", "baz/foo/bar/baz", true},
-		{"baz/foo", "/bar/baz", "baz/foo/bar/baz", true},
-		{"baz/foo/", "bar/baz", "baz/foo/bar/baz", true},
-		{"baz/foo/", "/bar/baz", "baz/foo/bar/baz", true},
-
-		// Not escape attempts, but oddly formatted relative paths. Disallowed.
-		{"foo", "./bar", "", false},
-		{"baz/foo", "./bar", "", false},
-		{"foo", "./bar/baz", "", false},
-		{"baz/foo", "./bar/baz", "", false},
-		{"baz/foo", "bar/../baz", "", false},
-		{"baz/foo", "/bar/../baz", "", false},
-		{"baz/foo", "./bar/../baz", "", false},
-		{"baz/foo", "bar/../baz", "", false},
-		{"baz/foo", "/bar/../baz", "", false},
-		{"baz/foo", "./bar/../baz", "", false},
-
-		// Results in an allowed path, but does it by probing. Disallowed.
-		{"foo", "../foo", "", false},
-		{"foo", "../foo/bar", "", false},
-		{"baz/foo", "../foo/bar", "", false},
-		{"baz/foo", "../../baz/foo/bar", "", false},
-		{"baz/foo", "bar/../../foo/bar", "", false},
-		{"baz/foo", "bar/../../../baz/foo/bar", "", false},
-
-		// Escape attempts.
-		{"foo", "", "", false},
-		{"foo", "/", "", false},
-		{"foo", "..", "", false},
-		{"foo", "/..", "", false},
-		{"foo", "../", "", false},
-		{"foo", "../bar", "", false},
-		{"foo", "../foobar", "", false},
-		{"foo/", "../bar", "", false},
-		{"foo/", "../foobar", "", false},
-		{"baz/foo", "../bar", "", false},
-		{"baz/foo", "../foobar", "", false},
-		{"baz/foo/", "../bar", "", false},
-		{"baz/foo/", "../foobar", "", false},
-		{"baz/foo/", "bar/../../quux/baz", "", false},
-
-		// Empty root is a misconfiguration.
-		{"", "/foo", "", false},
-		{"", "foo", "", false},
-		{"", ".", "", false},
-		{"", "..", "", false},
-		{"", "/", "", false},
-		{"", "", "", false},
-
-		// Root=/ is valid, and things should be verified as usual.
-		{"/", "foo", "/foo", true},
-		{"/", "/foo", "/foo", true},
-		{"/", "../foo", "", false},
-		{"/", ".", "", false},
-		{"/", "..", "", false},
-		{"/", "/", "", false},
-		{"/", "", "", false},
-	}
-
-	if runtime.GOOS == "windows" {
-		extraCases := []testcase{
-			{`c:\`, `foo`, `c:\foo`, true},
-			{`\\?\c:\`, `foo`, `\\?\c:\foo`, true},
-			{`c:\`, `\foo`, `c:\foo`, true},
-			{`\\?\c:\`, `\foo`, `\\?\c:\foo`, true},
-
-			{`c:\`, `\\foo`, ``, false},
-			{`c:\`, ``, ``, false},
-			{`c:\`, `.`, ``, false},
-			{`c:\`, `\`, ``, false},
-			{`\\?\c:\`, `\\foo`, ``, false},
-			{`\\?\c:\`, ``, ``, false},
-			{`\\?\c:\`, `.`, ``, false},
-			{`\\?\c:\`, `\`, ``, false},
-
-			// makes no sense, but will be treated simply as a bad filename
-			{`c:\foo`, `d:\bar`, `c:\foo\d:\bar`, true},
-		}
-
-		for _, tc := range cases {
-			// Add case where root is backslashed, rel is forward slashed
-			extraCases = append(extraCases, testcase{
-				root:   filepath.FromSlash(tc.root),
-				rel:    tc.rel,
-				joined: tc.joined,
-				ok:     tc.ok,
-			})
-			// and the opposite
-			extraCases = append(extraCases, testcase{
-				root:   tc.root,
-				rel:    filepath.FromSlash(tc.rel),
-				joined: tc.joined,
-				ok:     tc.ok,
-			})
-			// and both backslashed
-			extraCases = append(extraCases, testcase{
-				root:   filepath.FromSlash(tc.root),
-				rel:    filepath.FromSlash(tc.rel),
-				joined: tc.joined,
-				ok:     tc.ok,
-			})
-		}
-
-		cases = append(cases, extraCases...)
-	}
-
-	for _, tc := range cases {
-		res, err := rootedJoinedPath(tc.root, tc.rel)
-		if tc.ok {
-			if err != nil {
-				t.Errorf("Unexpected error for rootedJoinedPath(%q, %q): %v", tc.root, tc.rel, err)
-				continue
-			}
-			exp := filepath.FromSlash(tc.joined)
-			if res != exp {
-				t.Errorf("Unexpected result for rootedJoinedPath(%q, %q): %q != expected %q", tc.root, tc.rel, res, exp)
-			}
-		} else if err == nil {
-			t.Errorf("Unexpected pass for rootedJoinedPath(%q, %q) => %q", tc.root, tc.rel, res)
-			continue
-		}
+	if !okFolder {
+		t.Error("folderRunner missing")
+	} else if folderRunner == nil {
+		t.Error("m.folderRunners[\"default\"] == nil")
+	} else if folderRunner.(*sendReceiveFolder).fsWatcherChan == nil {
+		t.Error("fsWatcherChan == nil in folder")
 	}
 }
 
@@ -2489,4 +2411,32 @@ func (fakeAddr) Network() string {
 
 func (fakeAddr) String() string {
 	return "address"
+}
+
+// alwaysChanges is an ignore.ChangeDetector that always returns true on Changed()
+type alwaysChanged struct {
+	seen map[string]struct{}
+}
+
+func newAlwaysChanged() *alwaysChanged {
+	return &alwaysChanged{
+		seen: make(map[string]struct{}),
+	}
+}
+
+func (c *alwaysChanged) Remember(name string, _ time.Time) {
+	c.seen[name] = struct{}{}
+}
+
+func (c *alwaysChanged) Reset() {
+	c.seen = make(map[string]struct{})
+}
+
+func (c *alwaysChanged) Seen(name string) bool {
+	_, ok := c.seen[name]
+	return ok
+}
+
+func (c *alwaysChanged) Changed() bool {
+	return true
 }

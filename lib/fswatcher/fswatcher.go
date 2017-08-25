@@ -17,15 +17,14 @@ import (
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/ignore"
+	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/zillode/notify"
 )
 
-type fsEventType int
-
 const (
-	nonRemove fsEventType = 1
-	remove                = 2
-	mixed                 = 3
+	nonRemove eventType = 1
+	remove              = 2
+	mixed               = 3
 )
 
 // Not meant to be changed, but must be changeable for tests
@@ -34,439 +33,40 @@ var (
 	maxFilesPerDir = 128
 )
 
-type fsEvent struct {
-	path         string
+type eventType int
+
+func (evType eventType) String() string {
+	switch {
+	case evType == nonRemove:
+		return "non-remove"
+	case evType == remove:
+		return "remove"
+	case evType == mixed:
+		return "mixed"
+	default:
+		panic("bug: Unknown event type")
+	}
+}
+
+// Represents detected changes at one path until it times out and a scan is scheduled
+type event struct {
 	firstModTime time.Time
 	lastModTime  time.Time
-	eventType    fsEventType
+	evType       eventType
 }
 
-type fsEventsBatch map[string]*fsEvent
-
+// Stores pointers to both events directly within this directory and child
+// directories recursively containing events themselves.
 type eventDir struct {
-	path      string
-	parentDir *eventDir
-	events    fsEventsBatch
-	dirs      map[string]*eventDir
+	events map[string]*event
+	dirs   map[string]*eventDir
 }
 
-func newEventDir(path string, parentDir *eventDir) *eventDir {
+func newEventDir() *eventDir {
 	return &eventDir{
-		path:      path,
-		parentDir: parentDir,
-		events:    make(fsEventsBatch),
-		dirs:      make(map[string]*eventDir),
+		events: make(map[string]*event),
+		dirs:   make(map[string]*eventDir),
 	}
-}
-
-type fsWatcher struct {
-	folderID          string
-	folderPath        string
-	folderDescription string
-	ignorePerms       bool
-	// time interval to search for events to be passed to syncthing-core
-	notifyDelay time.Duration
-	// time after which an active event is passed to syncthing-core
-	notifyTimeout         time.Duration
-	notifyTimer           *time.Timer
-	notifyTimerNeedsReset bool
-	resetNotifyTimerChan  chan time.Duration
-	// All detected and to be scanned events are stored in a tree like
-	// structure mimicking folders to keep count of events per directory.
-	rootEventDir    *eventDir
-	fsEventChan     chan notify.EventInfo
-	notifyModelChan chan []string
-	inProgress      map[string]struct{}
-	ignores         *ignore.Matcher
-	ignoresUpdate   chan *ignore.Matcher
-	configUpdate    chan config.FolderConfiguration
-	stop            chan struct{}
-	cfg             *config.Wrapper
-}
-
-type Service interface {
-	Serve()
-	Stop()
-	C() <-chan []string
-	UpdateIgnores(ignores *ignore.Matcher)
-	VerifyConfiguration(from, to config.Configuration) error
-	CommitConfiguration(from, to config.Configuration) bool
-	String() string
-}
-
-func NewFsWatcher(id string, cfg *config.Wrapper, ignores *ignore.Matcher) (Service, error) {
-	fsWatcher := &fsWatcher{
-		folderID:              id,
-		notifyModelChan:       make(chan []string),
-		rootEventDir:          newEventDir(".", nil),
-		fsEventChan:           make(chan notify.EventInfo, maxFiles),
-		notifyTimerNeedsReset: false,
-		inProgress:            make(map[string]struct{}),
-		ignores:               ignores,
-		ignoresUpdate:         make(chan *ignore.Matcher),
-		resetNotifyTimerChan:  make(chan time.Duration),
-		stop:                  make(chan struct{}),
-		cfg:                   cfg,
-	}
-	folderCfg, ok := cfg.Folder(id)
-	if !ok {
-		panic(fmt.Sprintf("bug: Folder does not exist for folder %v", id))
-	}
-	fsWatcher.updateConfig(folderCfg)
-
-	if err := fsWatcher.setupNotifications(); err != nil {
-		return nil, err
-	}
-
-	return fsWatcher, nil
-}
-
-func (w *fsWatcher) setupNotifications() error {
-	absShouldIgnore := func(absPath string) bool {
-		if !isSubpath(absPath, w.folderPath) {
-			return true
-		}
-		relPath, _ := filepath.Rel(w.folderPath, absPath)
-		return w.ignores.ShouldIgnore(relPath)
-	}
-	if err := notify.WatchWithFilter(filepath.Join(w.folderPath, "..."), w.fsEventChan, absShouldIgnore, w.eventMask()); err != nil {
-		notify.Stop(w.fsEventChan)
-		close(w.fsEventChan)
-		if isWatchesTooFew(err) {
-			err = watchesLimitTooLowError(w.folderDescription)
-		}
-		return err
-	}
-	l.Infoln("Started filesystem notifications for folder", w.folderDescription)
-	return nil
-}
-
-func (w *fsWatcher) Serve() {
-	w.notifyTimer = time.NewTimer(w.notifyDelay)
-	defer w.notifyTimer.Stop()
-
-	inProgressItemSubscription := events.Default.Subscribe(events.ItemStarted | events.ItemFinished)
-
-	w.cfg.Subscribe(w)
-
-	for {
-		// Detect channel overflow
-		if len(w.fsEventChan) == maxFiles {
-		outer:
-			for {
-				select {
-				case <-w.fsEventChan:
-				default:
-					break outer
-				}
-			}
-			// Issue full rescan as events were lost
-			w.newFsEvent(w.folderPath, nonRemove)
-			l.Debugln(w, "Backend channel overflow: Scan entire folder")
-		}
-		select {
-		case event, _ := <-w.fsEventChan:
-			w.newFsEvent(event.Path(), w.eventType(event.Event()))
-		case event := <-inProgressItemSubscription.C():
-			w.updateInProgressSet(event)
-		case <-w.notifyTimer.C:
-			w.actOnTimer()
-		case interval := <-w.resetNotifyTimerChan:
-			w.resetNotifyTimer(interval)
-		case ignores := <-w.ignoresUpdate:
-			w.ignores = ignores
-		case cfg := <-w.configUpdate:
-			w.updateConfig(cfg)
-		case <-w.stop:
-			return
-		}
-	}
-}
-
-func (w *fsWatcher) Stop() {
-	close(w.stop)
-	notify.Stop(w.fsEventChan)
-	w.cfg.Unsubscribe(w)
-	l.Infoln("Stopped filesystem notifications for folder", w.folderDescription)
-}
-
-func (w *fsWatcher) C() <-chan []string {
-	return w.notifyModelChan
-}
-
-func (w *fsWatcher) newFsEvent(eventPath string, eventType fsEventType) {
-	if _, ok := w.rootEventDir.events["."]; ok {
-		l.Debugf("%v Will scan entire folder anyway; dropping: %s", w, eventPath)
-		return
-	}
-	if isSubpath(eventPath, w.folderPath) {
-		path, _ := filepath.Rel(w.folderPath, eventPath)
-		if w.pathInProgress(path) {
-			l.Debugf("%v Skipping notification for path we modified: %s", w, path)
-			return
-		}
-		if w.ignores.ShouldIgnore(path) {
-			l.Debugf("%v Ignoring: %s", w, path)
-			return
-		}
-		w.aggregateEvent(path, time.Now(), eventType)
-	} else {
-		l.Debugf("%v Path outside of folder root: %s", w, eventPath)
-		panic(fmt.Sprintf("bug: Detected change outside of root directory for folder %v", w.folderDescription))
-	}
-}
-
-func isSubpath(path string, folderPath string) bool {
-	return strings.HasPrefix(path, folderPath)
-}
-
-func (w *fsWatcher) resetNotifyTimerIfNeeded() {
-	if w.notifyTimerNeedsReset {
-		w.resetNotifyTimer(w.notifyDelay)
-	}
-}
-
-// resetNotifyTimer should only ever be called when notifyTimer has stopped
-// and notifyTimer.C been read from. Otherwise, call resetNotifyTimerIfNeeded.
-func (w *fsWatcher) resetNotifyTimer(duration time.Duration) {
-	l.Debugf("%v Resetting notifyTimer to %s", w, duration.String())
-	w.notifyTimerNeedsReset = false
-	w.notifyTimer.Reset(duration)
-}
-
-func (w *fsWatcher) aggregateEvent(path string, eventTime time.Time, eventType fsEventType) {
-	if path == "." || w.rootEventDir.eventCount() == maxFiles {
-		l.Debugln(w, "Scan entire folder")
-		firstModTime := eventTime
-		if w.rootEventDir.childCount() != 0 {
-			eventType |= w.rootEventDir.getEventType()
-			firstModTime = w.rootEventDir.getFirstModTime()
-		}
-		w.rootEventDir = newEventDir(".", nil)
-		w.rootEventDir.events["."] = &fsEvent{
-			path:         ".",
-			firstModTime: firstModTime,
-			lastModTime:  eventTime,
-			eventType:    eventType,
-		}
-		w.resetNotifyTimerIfNeeded()
-		return
-	}
-
-	parentDir := w.rootEventDir
-
-	// Check if any parent directory is already tracked or will exceed
-	// events per directory limit bottom up
-	pathSegments := strings.Split(filepath.ToSlash(path), "/")
-
-	// As root dir cannot be further aggregated, allow up to maxFiles
-	// children.
-	localMaxFilesPerDir := maxFiles
-	var currPath string
-	for i, pathSegment := range pathSegments[:len(pathSegments)-1] {
-		currPath = filepath.Join(currPath, pathSegment)
-
-		if event, ok := parentDir.events[currPath]; ok {
-			event.lastModTime = eventTime
-			event.eventType |= eventType
-			l.Debugf("%v Parent %s (type %s) already tracked: %s", w, currPath, event.eventType, path)
-			return
-		}
-
-		if parentDir.childCount() == localMaxFilesPerDir {
-			l.Debugf("%v Parent dir %s already has %d children, tracking it instead: %s", w, currPath, localMaxFilesPerDir, path)
-			w.aggregateEvent(filepath.Dir(currPath),
-				eventTime, eventType)
-			return
-		}
-
-		// If there are no events below path, but we need to recurse
-		// into that path, create eventDir at path.
-		if _, ok := parentDir.dirs[currPath]; !ok {
-			l.Debugf("%v Creating eventDir: %s", w, currPath)
-			parentDir.dirs[currPath] = newEventDir(currPath, parentDir)
-		}
-		parentDir = parentDir.dirs[currPath]
-
-		// Reset allowed children count to maxFilesPerDir for non-root
-		if i == 0 {
-			localMaxFilesPerDir = maxFilesPerDir
-		}
-	}
-
-	if event, ok := parentDir.events[path]; ok {
-		event.lastModTime = eventTime
-		event.eventType |= eventType
-		l.Debugf("%v Already tracked (type %v): %s", w, event.eventType, path)
-		return
-	}
-
-	childDir, ok := parentDir.dirs[path]
-
-	// If a dir existed at path, it would be removed from dirs, thus
-	// childCount would not increase.
-	if !ok && parentDir.childCount() == localMaxFilesPerDir {
-		l.Debugf("%v Parent dir already has %d children, tracking it instead: %s", w, localMaxFilesPerDir, path)
-		w.aggregateEvent(filepath.Dir(path), eventTime, eventType)
-		return
-	}
-
-	firstModTime := eventTime
-	if ok {
-		firstModTime = childDir.getFirstModTime()
-		eventType |= childDir.getEventType()
-		delete(parentDir.dirs, path)
-	}
-	l.Debugf("%v Tracking (type %v): %s", w, eventType, path)
-	parentDir.events[path] = &fsEvent{
-		path:         path,
-		firstModTime: firstModTime,
-		lastModTime:  eventTime,
-		eventType:    eventType,
-	}
-	w.resetNotifyTimerIfNeeded()
-}
-
-func (w *fsWatcher) actOnTimer() {
-	eventCount := w.rootEventDir.eventCount()
-	if eventCount == 0 {
-		l.Debugln(w, "No tracked events, waiting for new event.")
-		w.notifyTimerNeedsReset = true
-		return
-	}
-	oldFsEvents := w.popOldEvents(w.rootEventDir, time.Now())
-	if len(oldFsEvents) == 0 {
-		l.Debugln(w, "No old fs events")
-		w.resetNotifyTimer(w.notifyDelay)
-		return
-	}
-	// Sending to channel might block for a long time, but we need to keep
-	// reading from notify backend channel to avoid overflow
-	go func() {
-		timeBeforeSending := time.Now()
-		l.Debugf("%v Notifying about %d fs events", w, len(oldFsEvents))
-		separatedBatches := make(map[fsEventType][]string)
-		for path, event := range oldFsEvents {
-			separatedBatches[event.eventType] = append(separatedBatches[event.eventType], path)
-		}
-		for _, eventType := range [3]fsEventType{nonRemove, mixed, remove} {
-			if len(separatedBatches[eventType]) != 0 {
-				select {
-				case w.notifyModelChan <- separatedBatches[eventType]:
-				case <-w.stop:
-					return
-				}
-			}
-		}
-		// If sending to channel blocked for a long time,
-		// shorten next notifyDelay accordingly.
-		duration := time.Since(timeBeforeSending)
-		buffer := time.Duration(1) * time.Millisecond
-		l.Debugf("%s Resetting timer via channel after sending %d fs events", w, len(oldFsEvents))
-		var nextDelay time.Duration
-		switch {
-		case duration < w.notifyDelay/10:
-			nextDelay = w.notifyDelay
-		case duration+buffer > w.notifyDelay:
-			nextDelay = buffer
-		default:
-			nextDelay = w.notifyDelay - duration
-		}
-		select {
-		case w.resetNotifyTimerChan <- nextDelay:
-		case <-w.stop:
-		}
-		l.Debugf("%s Sent to timer reset channel after sending %d fs events", w, len(oldFsEvents))
-	}()
-	return
-}
-
-// popOldEvents removes events that should be sent to
-func (w *fsWatcher) popOldEvents(dir *eventDir, currTime time.Time) fsEventsBatch {
-	oldEvents := make(fsEventsBatch)
-	for _, childDir := range dir.dirs {
-		for path, event := range w.popOldEvents(childDir, currTime) {
-			oldEvents[path] = event
-		}
-	}
-	for path, event := range dir.events {
-		// 2 * results in mean event age of notifyDelay (assuming randomly
-		// occurring events). Reoccuring and remove/mixed events
-		// (for efficient renames) events are delayed until notifyTimeout.
-		if (event.eventType == nonRemove && 2*currTime.Sub(event.lastModTime) > w.notifyDelay) || currTime.Sub(event.firstModTime) > w.notifyTimeout {
-			oldEvents[path] = event
-			delete(dir.events, path)
-		}
-	}
-	if dir.parentDir != nil && dir.childCount() == 0 {
-		dir.parentDir.removeEmptyDir(dir.path)
-	}
-	return oldEvents
-}
-
-func (w *fsWatcher) updateInProgressSet(event events.Event) {
-	if event.Type == events.ItemStarted {
-		path := event.Data.(map[string]string)["item"]
-		w.inProgress[path] = struct{}{}
-	} else if event.Type == events.ItemFinished {
-		path := event.Data.(map[string]interface{})["item"].(string)
-		delete(w.inProgress, path)
-	}
-}
-
-func (w *fsWatcher) pathInProgress(path string) bool {
-	_, exists := w.inProgress[path]
-	return exists
-}
-
-func (w *fsWatcher) UpdateIgnores(ignores *ignore.Matcher) {
-	l.Debugln(w, "Ignore patterns update")
-	select {
-	case w.ignoresUpdate <- ignores:
-	case <-w.stop:
-	}
-}
-
-func (w *fsWatcher) String() string {
-	return fmt.Sprintf("fswatcher/%s:", w.folderDescription)
-}
-
-func (w *fsWatcher) eventType(notifyType notify.Event) fsEventType {
-	if notifyType&w.removeEventMask() != 0 {
-		return remove
-	}
-	return nonRemove
-}
-
-func (w *fsWatcher) VerifyConfiguration(from, to config.Configuration) error {
-	return nil
-}
-
-func (w *fsWatcher) CommitConfiguration(from, to config.Configuration) bool {
-	found := false
-	var cfg config.FolderConfiguration
-	for _, cfg = range to.Folders {
-		if cfg.ID == w.folderID {
-			found = true
-		}
-	}
-	if !found {
-		// Nothing to do, model will soon stop this service
-		return true
-	}
-	select {
-	case w.configUpdate <- cfg:
-	case <-w.stop:
-	}
-	return true
-}
-
-func (w *fsWatcher) updateConfig(cfg config.FolderConfiguration) {
-	w.folderPath = filepath.Clean(cfg.Path())
-	w.folderDescription = cfg.Description()
-	w.notifyDelay = time.Duration(cfg.FsNotificationsDelayS) * time.Second
-	w.notifyTimeout = notifyTimeout(cfg.FsNotificationsDelayS)
-	w.ignorePerms = cfg.IgnorePerms
 }
 
 func (dir *eventDir) eventCount() int {
@@ -481,25 +81,13 @@ func (dir *eventDir) childCount() int {
 	return len(dir.events) + len(dir.dirs)
 }
 
-func (dir *eventDir) removeEmptyDir(path string) {
-	delete(dir.dirs, path)
-	if dir.parentDir != nil && dir.childCount() == 0 {
-		dir.parentDir.removeEmptyDir(dir.path)
-	}
-}
-
-func watchesLimitTooLowError(folder string) error {
-	// Exchange link for own documentation when available
-	return fmt.Errorf("failed to install inotify handler for folder %s. Please increase inotify limits, see https://github.com/syncthing/syncthing-inotify#troubleshooting-for-folders-with-many-files-on-linux for more information", folder)
-}
-
-func (dir eventDir) getFirstModTime() time.Time {
+func (dir *eventDir) firstModTime() time.Time {
 	if dir.childCount() == 0 {
-		panic("bug: getFirstModTime must not be used on empty eventDir")
+		panic("bug: firstModTime must not be used on empty eventDir")
 	}
 	firstModTime := time.Now()
 	for _, childDir := range dir.dirs {
-		dirTime := childDir.getFirstModTime()
+		dirTime := childDir.firstModTime()
 		if dirTime.Before(firstModTime) {
 			firstModTime = dirTime
 		}
@@ -512,39 +100,484 @@ func (dir eventDir) getFirstModTime() time.Time {
 	return firstModTime
 }
 
-func (dir eventDir) getEventType() fsEventType {
+func (dir *eventDir) eventType() eventType {
 	if dir.childCount() == 0 {
-		panic("bug: getEventType must not be used on empty eventDir")
+		panic("bug: eventType must not be used on empty eventDir")
 	}
-	var eventType fsEventType
+	var evType eventType
 	for _, childDir := range dir.dirs {
-		eventType |= childDir.getEventType()
-		if eventType == mixed {
+		evType |= childDir.eventType()
+		if evType == mixed {
 			return mixed
 		}
 	}
 	for _, event := range dir.events {
-		eventType |= event.eventType
-		if eventType == mixed {
+		evType |= event.evType
+		if evType == mixed {
 			return mixed
 		}
 	}
-	return eventType
+	return evType
 }
 
-func (eventType fsEventType) String() string {
-	switch {
-	case eventType == nonRemove:
-		return "non-remove"
-	case eventType == remove:
-		return "remove"
-	case eventType == mixed:
-		return "mixed"
-	default:
-		panic("bug: Unknown event type")
+type watcher struct {
+	folderPath          string
+	folderCfg           config.FolderConfiguration
+	folderCfgUpdate     chan config.FolderConfiguration
+	folderIgnores       *ignore.Matcher
+	folderIgnoresUpdate chan *ignore.Matcher
+	// Time after which an event is scheduled for scanning when no modifications occur.
+	notifyDelay time.Duration
+	// Time after which an event is scheduled for scanning even though modifications occur.
+	notifyTimeout         time.Duration
+	notifyTimer           *time.Timer
+	notifyTimerNeedsReset bool
+	notifyTimerResetChan  chan time.Duration
+	notifyChan            chan []string
+	cfg                   *config.Wrapper
+	err                   error
+	errMut                sync.RWMutex
+	stop                  chan struct{}
+}
+
+type Service interface {
+	Serve()
+	Stop()
+	C() <-chan []string
+	UpdateIgnores(ignores *ignore.Matcher)
+	VerifyConfiguration(from, to config.Configuration) error
+	CommitConfiguration(from, to config.Configuration) bool
+	String() string
+}
+
+func New(folderCfg config.FolderConfiguration, cfg *config.Wrapper, ignores *ignore.Matcher) Service {
+	fsWatcher := &watcher{
+		folderIgnores:         ignores,
+		folderIgnoresUpdate:   make(chan *ignore.Matcher),
+		folderCfgUpdate:       make(chan config.FolderConfiguration),
+		notifyTimerNeedsReset: false,
+		notifyTimerResetChan:  make(chan time.Duration),
+		notifyChan:            make(chan []string),
+		cfg:                   cfg,
+		errMut:                sync.NewRWMutex(),
+		stop:                  make(chan struct{}),
+	}
+	fsWatcher.updateConfig(folderCfg)
+	return fsWatcher
+}
+
+func (w *watcher) Serve() {
+	backendEventChan, err := w.setupBackend()
+	if err != nil {
+		l.Debugln(w, "failed to setup backend", err)
+		w.errMut.Lock()
+		if err != w.err {
+			l.Warnf("Failed to start filesystem watcher for folder %s: %v", w.folderCfg.Description(), err)
+			w.err = err
+		}
+		w.errMut.Unlock()
+		return
+	}
+
+	w.errMut.Lock()
+	w.err = nil
+	w.errMut.Unlock()
+	l.Infoln("Started filesystem watcher for folder", w.folderCfg.Description())
+
+	// Will not return unless watcher is stopped or an unrecoverable error occurs
+	// Necessary for unit tests where the backend is mocked
+	w.mainLoop(backendEventChan)
+}
+
+func (w *watcher) setupBackend() (chan notify.EventInfo, error) {
+	absShouldIgnore := func(absPath string) bool {
+		if !isSubpath(absPath, w.folderPath) {
+			panic(fmt.Sprintf("bug: Notify backend is processing a change outside of the root dir of folder %v", w.folderCfg.Description()))
+		}
+		relPath, _ := filepath.Rel(w.folderPath, absPath)
+		return w.folderIgnores.ShouldIgnore(relPath)
+	}
+	backendEventChan := make(chan notify.EventInfo, maxFiles)
+	if err := notify.WatchWithFilter(filepath.Join(w.folderPath, "..."), backendEventChan, absShouldIgnore, w.eventMask()); err != nil {
+		notify.Stop(backendEventChan)
+		close(backendEventChan)
+		if reachedMaxUserWatches(err) {
+			err = reachedMaxUserWatchesError(w.folderCfg.Description())
+		}
+		return nil, err
+	}
+	return backendEventChan, nil
+}
+
+func (w *watcher) mainLoop(backendEventChan chan notify.EventInfo) {
+	w.notifyTimer = time.NewTimer(w.notifyDelay)
+	defer w.notifyTimer.Stop()
+
+	inProgress := make(map[string]struct{})
+	inProgressItemSubscription := events.Default.Subscribe(events.ItemStarted | events.ItemFinished)
+
+	w.cfg.Subscribe(w)
+
+	rootEventDir := newEventDir()
+
+	for {
+		// Detect channel overflow
+		if len(backendEventChan) == maxFiles {
+		outer:
+			for {
+				select {
+				case <-backendEventChan:
+				default:
+					break outer
+				}
+			}
+			// When next scheduling a scan, do it on the entire folder as events have been lost.
+			w.newEvent(w.folderPath, nonRemove, rootEventDir, inProgress)
+			l.Debugln(w, "Backend channel overflow: Scan entire folder")
+		}
+		select {
+		case event, _ := <-backendEventChan:
+			w.newEvent(event.Path(), w.eventType(event.Event()), rootEventDir, inProgress)
+		case event := <-inProgressItemSubscription.C():
+			updateInProgressSet(event, inProgress)
+		case <-w.notifyTimer.C:
+			w.actOnTimer(rootEventDir)
+		case interval := <-w.notifyTimerResetChan:
+			w.resetNotifyTimer(interval)
+		case ignores := <-w.folderIgnoresUpdate:
+			notify.Stop(backendEventChan)
+			close(backendEventChan)
+			w.folderIgnores = ignores
+			var err error
+			backendEventChan, err = w.setupBackend()
+			if err != nil {
+				l.Warnf("Failed to setup filesystem watcher after ignore patterns changed for folder %s: %v", w.folderCfg.Description(), err)
+				w.errMut.Lock()
+				w.err = err
+				w.errMut.Unlock()
+				return
+			}
+		case folderCfg := <-w.folderCfgUpdate:
+			w.updateConfig(folderCfg)
+		case <-w.stop:
+			notify.Stop(backendEventChan)
+			close(w.notifyChan)
+			w.cfg.Unsubscribe(w)
+			l.Infoln("Stopped filesystem watcher for folder", w.folderCfg.Description())
+			return
+		}
 	}
 }
 
+func (w *watcher) Stop() {
+	close(w.stop)
+}
+
+func (w *watcher) C() <-chan []string {
+	return w.notifyChan
+}
+
+func (w *watcher) newEvent(evPath string, evType eventType, rootEventDir *eventDir, inProgress map[string]struct{}) {
+	if _, ok := rootEventDir.events["."]; ok {
+		l.Debugf("%v Will scan entire folder anyway; dropping: %s", w, evPath)
+		return
+	}
+	if !isSubpath(evPath, w.folderPath) {
+		panic(fmt.Sprintf("bug: Detected change outside of root directory for folder %v at %s", w.folderCfg.Description(), evPath))
+	}
+	relPath, _ := filepath.Rel(w.folderPath, evPath)
+	if _, ok := inProgress[relPath]; ok {
+		l.Debugf("%v Skipping path we modified: %s", w, relPath)
+		return
+	}
+	if w.folderIgnores.ShouldIgnore(relPath) {
+		l.Debugf("%v Ignoring: %s", w, relPath)
+		return
+	}
+	w.aggregateEvent(relPath, time.Now(), evType, rootEventDir)
+}
+
+// Provide to be checked path first, then the path of the folder root.
+var isSubpath = strings.HasPrefix
+
+func (w *watcher) resetNotifyTimerIfNeeded() {
+	if w.notifyTimerNeedsReset {
+		w.resetNotifyTimer(w.notifyDelay)
+	}
+}
+
+// resetNotifyTimer should only ever be called when notifyTimer has stopped
+// and notifyTimer.C been read from. Otherwise, call resetNotifyTimerIfNeeded.
+func (w *watcher) resetNotifyTimer(duration time.Duration) {
+	l.Debugf("%v Resetting notifyTimer to %s", w, duration.String())
+	w.notifyTimerNeedsReset = false
+	w.notifyTimer.Reset(duration)
+}
+
+func (w *watcher) aggregateEvent(evPath string, evTime time.Time, evType eventType, rootEventDir *eventDir) {
+	if evPath == "." || rootEventDir.eventCount() == maxFiles {
+		l.Debugln(w, "Scan entire folder")
+		firstModTime := evTime
+		if rootEventDir.childCount() != 0 {
+			evType |= rootEventDir.eventType()
+			firstModTime = rootEventDir.firstModTime()
+		}
+		rootEventDir.dirs = make(map[string]*eventDir)
+		rootEventDir.events = make(map[string]*event)
+		rootEventDir.events["."] = &event{
+			firstModTime: firstModTime,
+			lastModTime:  evTime,
+			evType:       evType,
+		}
+		w.resetNotifyTimerIfNeeded()
+		return
+	}
+
+	parentDir := rootEventDir
+
+	// Check if any parent directory is already tracked or will exceed
+	// events per directory limit bottom up
+	pathSegments := strings.Split(filepath.ToSlash(evPath), "/")
+
+	// As root dir cannot be further aggregated, allow up to maxFiles
+	// children.
+	localMaxFilesPerDir := maxFiles
+	var currPath string
+	for i, name := range pathSegments[:len(pathSegments)-1] {
+		currPath = filepath.Join(currPath, name)
+
+		if event, ok := parentDir.events[name]; ok {
+			event.lastModTime = evTime
+			event.evType |= evType
+			l.Debugf("%v Parent %s (type %s) already tracked: %s", w, currPath, event.evType, evPath)
+			return
+		}
+
+		if parentDir.childCount() == localMaxFilesPerDir {
+			l.Debugf("%v Parent dir %s already has %d children, tracking it instead: %s", w, currPath, localMaxFilesPerDir, evPath)
+			w.aggregateEvent(filepath.Dir(currPath), evTime, evType, rootEventDir)
+			return
+		}
+
+		// If there are no events below path, but we need to recurse
+		// into that path, create eventDir at path.
+		if newParent, ok := parentDir.dirs[name]; ok {
+			parentDir = newParent
+		} else {
+			l.Debugf("%v Creating eventDir at: %s", w, currPath)
+			newParent = newEventDir()
+			parentDir.dirs[name] = newParent
+			parentDir = newParent
+		}
+
+		// Reset allowed children count to maxFilesPerDir for non-root
+		if i == 0 {
+			localMaxFilesPerDir = maxFilesPerDir
+		}
+	}
+
+	name := pathSegments[len(pathSegments)-1]
+
+	if event, ok := parentDir.events[name]; ok {
+		event.lastModTime = evTime
+		event.evType |= evType
+		l.Debugf("%v Already tracked (type %v): %s", w, event.evType, evPath)
+		return
+	}
+
+	childDir, ok := parentDir.dirs[name]
+
+	// If a dir existed at path, it would be removed from dirs, thus
+	// childCount would not increase.
+	if !ok && parentDir.childCount() == localMaxFilesPerDir {
+		l.Debugf("%v Parent dir already has %d children, tracking it instead: %s", w, localMaxFilesPerDir, evPath)
+		w.aggregateEvent(filepath.Dir(evPath), evTime, evType, rootEventDir)
+		return
+	}
+
+	firstModTime := evTime
+	if ok {
+		firstModTime = childDir.firstModTime()
+		evType |= childDir.eventType()
+		delete(parentDir.dirs, name)
+	}
+	l.Debugf("%v Tracking (type %v): %s", w, evType, evPath)
+	parentDir.events[name] = &event{
+		firstModTime: firstModTime,
+		lastModTime:  evTime,
+		evType:       evType,
+	}
+	w.resetNotifyTimerIfNeeded()
+}
+
+func (w *watcher) actOnTimer(rootEventDir *eventDir) {
+	eventCount := rootEventDir.eventCount()
+	if eventCount == 0 {
+		l.Debugln(w, "No tracked events, waiting for new event.")
+		w.notifyTimerNeedsReset = true
+		return
+	}
+	oldFsEvents := w.popOldEvents(rootEventDir, ".", time.Now())
+	if len(oldFsEvents) == 0 {
+		l.Debugln(w, "No old fs events")
+		w.resetNotifyTimer(w.notifyDelay)
+		return
+	}
+	// Sending to channel might block for a long time, but we need to keep
+	// reading from notify backend channel to avoid overflow
+	go w.notify(oldFsEvents)
+}
+
+// Schedule scan for given events dispatching deletes last and reset notification
+// afterwards to set up for the next scan scheduling.
+func (w *watcher) notify(oldFsEvents map[string]*event) {
+	timeBeforeSending := time.Now()
+	l.Debugf("%v Notifying about %d fs events", w, len(oldFsEvents))
+	separatedBatches := make(map[eventType][]string)
+	for path, event := range oldFsEvents {
+		separatedBatches[event.evType] = append(separatedBatches[event.evType], path)
+	}
+	for _, evType := range [3]eventType{nonRemove, mixed, remove} {
+		currBatch := separatedBatches[evType]
+		if len(currBatch) != 0 {
+			select {
+			case w.notifyChan <- currBatch:
+			case <-w.stop:
+				return
+			}
+		}
+	}
+	// If sending to channel blocked for a long time,
+	// shorten next notifyDelay accordingly.
+	duration := time.Since(timeBeforeSending)
+	buffer := time.Millisecond
+	var nextDelay time.Duration
+	switch {
+	case duration < w.notifyDelay/10:
+		nextDelay = w.notifyDelay
+	case duration+buffer > w.notifyDelay:
+		nextDelay = buffer
+	default:
+		nextDelay = w.notifyDelay - duration
+	}
+	select {
+	case w.notifyTimerResetChan <- nextDelay:
+	case <-w.stop:
+	}
+}
+
+// popOldEvents finds events that should be scheduled for scanning recursively in dirs,
+// removes those events and empty eventDirs and returns all these events
+func (w *watcher) popOldEvents(dir *eventDir, path string, currTime time.Time) map[string]*event {
+	oldEvents := make(map[string]*event)
+	for childName, childDir := range dir.dirs {
+		for evPath, event := range w.popOldEvents(childDir, filepath.Join(path, childName), currTime) {
+			oldEvents[evPath] = event
+		}
+		if childDir.childCount() == 0 {
+			delete(dir.dirs, childName)
+		}
+	}
+	for name, event := range dir.events {
+		if w.isOld(event, currTime) {
+			oldEvents[filepath.Join(path, name)] = event
+			delete(dir.events, name)
+		}
+	}
+	return oldEvents
+}
+
+func (w *watcher) isOld(ev *event, currTime time.Time) bool {
+	// Deletes should always be scanned last, therefore they are always
+	// delayed by letting them time out (see below).
+	// An event that has not registered any new modifications recently is scanned.
+	// w.notifyDelay is the user facing value signifying the normal delay between
+	// a picking up a modification and scanning it. As scheduling scans happens at
+	// regular intervals of w.notifyDelay the delay of a single event is not exactly
+	// w.notifyDelay, but lies in in the range of 0.5 to 1.5 times w.notifyDelay.
+	if ev.evType == nonRemove && 2*currTime.Sub(ev.lastModTime) > w.notifyDelay {
+		return true
+	}
+	// When an event registers repeat modifications or involves removals it
+	// is delayed to reduce resource usage, but after a certain time (notifyTimeout)
+	// passed it is scanned anyway.
+	return currTime.Sub(ev.firstModTime) > w.notifyTimeout
+}
+
+func (w *watcher) UpdateIgnores(ignores *ignore.Matcher) {
+	l.Debugln(w, "Ignore patterns update")
+	w.errMut.RLock()
+	defer w.errMut.RUnlock()
+	if w.err != nil {
+		return
+	}
+	select {
+	case w.folderIgnoresUpdate <- ignores:
+	case <-w.stop:
+	}
+}
+
+func (w *watcher) String() string {
+	return fmt.Sprintf("fswatcher/%s:", w.folderCfg.Description())
+}
+
+func (w *watcher) eventType(notifyType notify.Event) eventType {
+	if notifyType&w.removeEventMask() != 0 {
+		return remove
+	}
+	return nonRemove
+}
+
+func (w *watcher) VerifyConfiguration(from, to config.Configuration) error {
+	return nil
+}
+
+func (w *watcher) CommitConfiguration(from, to config.Configuration) bool {
+	w.errMut.RLock()
+	defer w.errMut.RUnlock()
+	if w.err != nil {
+		return true
+	}
+	for _, folderCfg := range to.Folders {
+		if folderCfg.ID == w.folderCfg.ID {
+			select {
+			case w.folderCfgUpdate <- folderCfg:
+			case <-w.stop:
+			}
+			return true
+		}
+	}
+	// Nothing to do, model will soon stop this service
+	return true
+}
+
+func (w *watcher) updateConfig(folderCfg config.FolderConfiguration) {
+	w.folderPath = filepath.Clean(folderCfg.Path)
+	w.notifyDelay = time.Duration(folderCfg.FSWatcherDelayS) * time.Second
+	w.notifyTimeout = notifyTimeout(folderCfg.FSWatcherDelayS)
+	w.folderCfg = folderCfg
+}
+
+func updateInProgressSet(event events.Event, inProgress map[string]struct{}) {
+	if event.Type == events.ItemStarted {
+		path := event.Data.(map[string]string)["item"]
+		inProgress[path] = struct{}{}
+	} else if event.Type == events.ItemFinished {
+		path := event.Data.(map[string]interface{})["item"].(string)
+		delete(inProgress, path)
+	}
+}
+
+func reachedMaxUserWatchesError(folder string) error {
+	// Exchange link for own documentation when available
+	return fmt.Errorf("failed to install inotify handler for folder %s. Please increase inotify limits, see https://github.com/syncthing/syncthing-inotify#troubleshooting-for-folders-with-many-files-on-linux for more information", folder)
+}
+
+// Events that involve removals or continuously receive new modifications are
+// delayed but must time out at some point. The following numbers come out of thin
+// air, they were just considered as a sensible compromise between fast updates and
+// saving resources. For short delays the timeout is 6 times the delay, capped at 1
+// minute. For delays longer than 1 minute, the delay and timeout are equal.
 func notifyTimeout(eventDelayS int) time.Duration {
 	shortDelayS := 10
 	shortDelayMultiplicator := 6

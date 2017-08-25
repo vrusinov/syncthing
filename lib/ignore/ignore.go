@@ -12,13 +12,13 @@ import (
 	"crypto/md5"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/gobwas/glob"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/sync"
 )
@@ -64,24 +64,61 @@ func (r Result) IsCaseFolded() bool {
 	return r&resultFoldCase == resultFoldCase
 }
 
-type Matcher struct {
-	lines     []string
-	patterns  []Pattern
-	withCache bool
-	matches   *cache
-	curHash   string
-	stop      chan struct{}
-	modtimes  map[string]time.Time
-	mut       sync.Mutex
+// The ChangeDetector is responsible for determining if files have changed
+// on disk. It gets told to Remember() files (name and modtime) and will
+// then get asked if a file has been Seen() (i.e., Remember() has been
+// called on it) and if any of the files have Changed(). To forget all
+// files, call Reset().
+type ChangeDetector interface {
+	Remember(name string, modtime time.Time)
+	Seen(name string) bool
+	Changed() bool
+	Reset()
 }
 
-func New(withCache bool) *Matcher {
-	m := &Matcher{
-		withCache: withCache,
-		stop:      make(chan struct{}),
-		mut:       sync.NewMutex(),
+type Matcher struct {
+	fs             fs.Filesystem
+	lines          []string  // exact lines read from .stignore
+	patterns       []Pattern // patterns including those from included files
+	withCache      bool
+	matches        *cache
+	curHash        string
+	stop           chan struct{}
+	changeDetector ChangeDetector
+	mut            sync.Mutex
+}
+
+// An Option can be passed to New()
+type Option func(*Matcher)
+
+// WithCache enables or disables lookup caching. The default is disabled.
+func WithCache(v bool) Option {
+	return func(m *Matcher) {
+		m.withCache = v
 	}
-	if withCache {
+}
+
+// WithChangeDetector sets a custom ChangeDetector. The default is to simply
+// use the on disk modtime for comparison.
+func WithChangeDetector(cd ChangeDetector) Option {
+	return func(m *Matcher) {
+		m.changeDetector = cd
+	}
+}
+
+func New(fs fs.Filesystem, opts ...Option) *Matcher {
+	m := &Matcher{
+		fs:   fs,
+		stop: make(chan struct{}),
+		mut:  sync.NewMutex(),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	if m.changeDetector == nil {
+		m.changeDetector = newModtimeChecker(fs)
+	}
+	if m.withCache {
 		go m.clean(2 * time.Hour)
 	}
 	return m
@@ -91,11 +128,11 @@ func (m *Matcher) Load(file string) error {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
-	if m.patternsUnchanged(file) {
+	if m.changeDetector.Seen(file) && !m.changeDetector.Changed() {
 		return nil
 	}
 
-	fd, err := os.Open(file)
+	fd, err := m.fs.Open(file)
 	if err != nil {
 		m.parseLocked(&bytes.Buffer{}, file)
 		return err
@@ -108,9 +145,8 @@ func (m *Matcher) Load(file string) error {
 		return err
 	}
 
-	m.modtimes = map[string]time.Time{
-		file: info.ModTime(),
-	}
+	m.changeDetector.Reset()
+	m.changeDetector.Remember(file, info.ModTime())
 
 	return m.parseLocked(fd, file)
 }
@@ -122,7 +158,7 @@ func (m *Matcher) Parse(r io.Reader, file string) error {
 }
 
 func (m *Matcher) parseLocked(r io.Reader, file string) error {
-	lines, patterns, err := parseIgnoreFile(r, file, m.modtimes)
+	lines, patterns, err := parseIgnoreFile(m.fs, r, file, m.changeDetector)
 	// Error is saved and returned at the end. We process the patterns
 	// (possibly blank) anyway.
 
@@ -140,26 +176,6 @@ func (m *Matcher) parseLocked(r io.Reader, file string) error {
 	}
 
 	return err
-}
-
-// patternsUnchanged returns true if none of the files making up the loaded
-// patterns have changed since last check.
-func (m *Matcher) patternsUnchanged(file string) bool {
-	if _, ok := m.modtimes[file]; !ok {
-		return false
-	}
-
-	for filename, modtime := range m.modtimes {
-		info, err := os.Stat(filename)
-		if err != nil {
-			return false
-		}
-		if !info.ModTime().Equal(modtime) {
-			return false
-		}
-	}
-
-	return true
 }
 
 func (m *Matcher) Match(file string) (result Result) {
@@ -284,12 +300,12 @@ func hashPatterns(patterns []Pattern) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func loadIgnoreFile(file string, modtimes map[string]time.Time) ([]string, []Pattern, error) {
-	if _, ok := modtimes[file]; ok {
+func loadIgnoreFile(fs fs.Filesystem, file string, cd ChangeDetector) ([]string, []Pattern, error) {
+	if cd.Seen(file) {
 		return nil, nil, fmt.Errorf("multiple include of ignore file %q", file)
 	}
 
-	fd, err := os.Open(file)
+	fd, err := fs.Open(file)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -299,12 +315,13 @@ func loadIgnoreFile(file string, modtimes map[string]time.Time) ([]string, []Pat
 	if err != nil {
 		return nil, nil, err
 	}
-	modtimes[file] = info.ModTime()
 
-	return parseIgnoreFile(fd, file, modtimes)
+	cd.Remember(file, info.ModTime())
+
+	return parseIgnoreFile(fs, fd, file, cd)
 }
 
-func parseIgnoreFile(fd io.Reader, currentFile string, modtimes map[string]time.Time) ([]string, []Pattern, error) {
+func parseIgnoreFile(fs fs.Filesystem, fd io.Reader, currentFile string, cd ChangeDetector) ([]string, []Pattern, error) {
 	var lines []string
 	var patterns []Pattern
 
@@ -371,11 +388,10 @@ func parseIgnoreFile(fd io.Reader, currentFile string, modtimes map[string]time.
 		} else if strings.HasPrefix(line, "#include ") {
 			includeRel := line[len("#include "):]
 			includeFile := filepath.Join(filepath.Dir(currentFile), includeRel)
-			includeLines, includePatterns, err := loadIgnoreFile(includeFile, modtimes)
+			_, includePatterns, err := loadIgnoreFile(fs, includeFile, cd)
 			if err != nil {
 				return fmt.Errorf("include of %q: %v", includeRel, err)
 			}
-			lines = append(lines, includeLines...)
 			patterns = append(patterns, includePatterns...)
 		} else {
 			// Path name or pattern, add it so it matches files both in
@@ -436,7 +452,7 @@ func parseIgnoreFile(fd io.Reader, currentFile string, modtimes map[string]time.
 // path must be clean (i.e., in canonical shortest form).
 func IsInternal(file string) bool {
 	internals := []string{".stfolder", ".stignore", ".stversions"}
-	pathSep := string(os.PathSeparator)
+	pathSep := string(fs.PathSeparator)
 	for _, internal := range internals {
 		if file == internal {
 			return true
@@ -449,8 +465,8 @@ func IsInternal(file string) bool {
 }
 
 // WriteIgnores is a convenience function to avoid code duplication
-func WriteIgnores(path string, content []string) error {
-	fd, err := osutil.CreateAtomic(path)
+func WriteIgnores(filesystem fs.Filesystem, path string, content []string) error {
+	fd, err := osutil.CreateAtomicFilesystem(filesystem, path)
 	if err != nil {
 		return err
 	}
@@ -462,7 +478,47 @@ func WriteIgnores(path string, content []string) error {
 	if err := fd.Close(); err != nil {
 		return err
 	}
-	osutil.HideFile(path)
+	filesystem.Hide(path)
 
 	return nil
+}
+
+// modtimeChecker is the default implementation of ChangeDetector
+type modtimeChecker struct {
+	fs       fs.Filesystem
+	modtimes map[string]time.Time
+}
+
+func newModtimeChecker(fs fs.Filesystem) *modtimeChecker {
+	return &modtimeChecker{
+		fs:       fs,
+		modtimes: map[string]time.Time{},
+	}
+}
+
+func (c *modtimeChecker) Remember(name string, modtime time.Time) {
+	c.modtimes[name] = modtime
+}
+
+func (c *modtimeChecker) Seen(name string) bool {
+	_, ok := c.modtimes[name]
+	return ok
+}
+
+func (c *modtimeChecker) Reset() {
+	c.modtimes = map[string]time.Time{}
+}
+
+func (c *modtimeChecker) Changed() bool {
+	for name, modtime := range c.modtimes {
+		info, err := c.fs.Stat(name)
+		if err != nil {
+			return true
+		}
+		if !info.ModTime().Equal(modtime) {
+			return true
+		}
+	}
+
+	return false
 }

@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/d4l3k/messagediff"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 )
 
@@ -73,6 +74,7 @@ func TestDefaultValues(t *testing.T) {
 		KCPSendWindowSize:       128,
 		KCPUpdateIntervalMs:     25,
 		KCPFastResend:           false,
+		DefaultFolderPath:       "~",
 	}
 
 	cfg := New(device1)
@@ -101,20 +103,20 @@ func TestDeviceConfig(t *testing.T) {
 
 		expectedFolders := []FolderConfiguration{
 			{
-				ID:                    "test",
-				RawPath:               "testdata",
-				Devices:               []FolderDeviceConfiguration{{DeviceID: device1}, {DeviceID: device4}},
-				Type:                  FolderTypeSendOnly,
-				RescanIntervalS:       600,
-				FsNotifications:       false,
-				FsNotificationsDelayS: 10,
-				Copiers:               0,
-				Pullers:               0,
-				Hashers:               0,
-				AutoNormalize:         true,
-				MinDiskFree:           Size{1, "%"},
-				MaxConflicts:          -1,
-				Fsync:                 true,
+				ID:               "test",
+				FilesystemType:   fs.FilesystemTypeBasic,
+				Path:             "testdata",
+				Devices:          []FolderDeviceConfiguration{{DeviceID: device1}, {DeviceID: device4}},
+				Type:             FolderTypeSendOnly,
+				RescanIntervalS:  600,
+				FSWatcherEnabled: false,
+				FSWatcherDelayS:  10,
+				Copiers:          0,
+				Pullers:          0,
+				Hashers:          0,
+				AutoNormalize:    true,
+				MinDiskFree:      Size{1, "%"},
+				MaxConflicts:     -1,
 				Versioning: VersioningConfiguration{
 					Params: map[string]string{},
 				},
@@ -122,15 +124,11 @@ func TestDeviceConfig(t *testing.T) {
 			},
 		}
 
-		// The cachedPath will have been resolved to an absolute path,
+		// The cachedFilesystem will have been resolved to an absolute path,
 		// depending on where the tests are running. Zero it out so we don't
 		// fail based on that.
 		for i := range cfg.Folders {
-			cfg.Folders[i].cachedPath = ""
-		}
-
-		if runtime.GOOS != "windows" {
-			expectedFolders[0].RawPath += string(filepath.Separator)
+			cfg.Folders[i].cachedFilesystem = nil
 		}
 
 		expectedDevices := []DeviceConfiguration{
@@ -223,6 +221,7 @@ func TestOverriddenValues(t *testing.T) {
 		KCPSendWindowSize:       1280,
 		KCPUpdateIntervalMs:     1000,
 		KCPFastResend:           true,
+		DefaultFolderPath:       "/media/syncthing",
 	}
 
 	os.Unsetenv("STNOUPGRADE")
@@ -377,16 +376,17 @@ func TestVersioningConfig(t *testing.T) {
 }
 
 func TestIssue1262(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skipf("path gets converted to absolute as part of the filesystem initialization on linux")
+	}
+
 	cfg, err := Load("testdata/issue-1262.xml", device4)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	actual := cfg.Folders()["test"].RawPath
-	expected := "e:/"
-	if runtime.GOOS == "windows" {
-		expected = `e:\`
-	}
+	actual := cfg.Folders()["test"].Filesystem().URI()
+	expected := `e:\`
 
 	if actual != expected {
 		t.Errorf("%q != %q", actual, expected)
@@ -416,43 +416,12 @@ func TestIssue1750(t *testing.T) {
 	}
 }
 
-func TestWindowsPaths(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("Not useful on non-Windows")
-		return
-	}
-
-	folder := FolderConfiguration{
-		RawPath: `e:\`,
-	}
-
-	expected := `\\?\e:\`
-	actual := folder.Path()
-	if actual != expected {
-		t.Errorf("%q != %q", actual, expected)
-	}
-
-	folder.RawPath = `\\192.0.2.22\network\share`
-	expected = folder.RawPath
-	actual = folder.Path()
-	if actual != expected {
-		t.Errorf("%q != %q", actual, expected)
-	}
-
-	folder.RawPath = `relative\path`
-	expected = folder.RawPath
-	actual = folder.Path()
-	if actual == expected || !strings.HasPrefix(actual, "\\\\?\\") {
-		t.Errorf("%q == %q, expected absolutification", actual, expected)
-	}
-}
-
 func TestFolderPath(t *testing.T) {
 	folder := FolderConfiguration{
-		RawPath: "~/tmp",
+		Path: "~/tmp",
 	}
 
-	realPath := folder.Path()
+	realPath := folder.Filesystem().URI()
 	if !filepath.IsAbs(realPath) {
 		t.Error(realPath, "should be absolute")
 	}
@@ -677,8 +646,8 @@ func TestEmptyFolderPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	folder := wrapper.Folders()["f1"]
-	if folder.Path() != "" {
-		t.Errorf("Expected %q to be empty", folder.Path())
+	if folder.cachedFilesystem != nil {
+		t.Errorf("Expected %q to be empty", folder.cachedFilesystem)
 	}
 }
 
@@ -807,5 +776,36 @@ func TestSharesRemovedOnDeviceRemoval(t *testing.T) {
 	raw = wrapper.RawCopy()
 	if len(raw.Folders[0].Devices) > len(raw.Devices) {
 		t.Error("Unexpected extra device")
+	}
+}
+
+func TestIssue4219(t *testing.T) {
+	// Adding a folder that was previously ignored should make it unignored.
+
+	r := bytes.NewReader([]byte(`{
+		"folders": [
+			{"id": "abcd123"}
+		],
+		"ignoredFolders": ["t1", "abcd123", "t2"]
+	}`))
+
+	cfg, err := ReadJSON(r, protocol.LocalDeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(cfg.IgnoredFolders) != 2 {
+		t.Errorf("There should be two ignored folders, not %d", len(cfg.IgnoredFolders))
+	}
+
+	w := Wrap("/tmp/cfg", cfg)
+	if !w.IgnoredFolder("t1") {
+		t.Error("Folder t1 should be ignored")
+	}
+	if !w.IgnoredFolder("t2") {
+		t.Error("Folder t2 should be ignored")
+	}
+	if w.IgnoredFolder("abcd123") {
+		t.Error("Folder abcd123 should not be ignored")
 	}
 }

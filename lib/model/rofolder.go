@@ -23,7 +23,7 @@ type sendOnlyFolder struct {
 	folder
 }
 
-func newSendOnlyFolder(model *Model, cfg config.FolderConfiguration, _ versioner.Versioner, _ *fs.MtimeFS, fsWatcher fswatcher.Service) service {
+func newSendOnlyFolder(model *Model, cfg config.FolderConfiguration, _ versioner.Versioner, _ fs.Filesystem, fsWatcher fswatcher.Service) service {
 	return &sendOnlyFolder{folder: newFolder(model, cfg, fsWatcher)}
 }
 
@@ -67,7 +67,7 @@ func (f *sendOnlyFolder) Serve() {
 		case next := <-f.scan.delay:
 			f.scan.timer.Reset(next)
 
-		case fsEvents := <-f.fsWatchChan:
+		case fsEvents := <-f.fsWatcherChan:
 			l.Debugln(f, "filesystem notification rescan")
 			f.scanSubdirs(fsEvents)
 		}

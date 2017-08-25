@@ -20,18 +20,18 @@ func TestErrorInotifyInterpretation(t *testing.T) {
 	var errTooManyFiles syscall.Errno = 24
 	var errNoSpace syscall.Errno = 28
 
-	if !isWatchesTooFew(errTooManyFiles) {
+	if !reachedMaxUserWatches(errTooManyFiles) {
 		t.Errorf("Errno %v should be recognised to be about inotify limits.", errTooManyFiles)
 	}
-	if !isWatchesTooFew(errNoSpace) {
+	if !reachedMaxUserWatches(errNoSpace) {
 		t.Errorf("Errno %v should be recognised to be about inotify limits.", errNoSpace)
 	}
 	err := errors.New("Another error")
-	if isWatchesTooFew(err) {
+	if reachedMaxUserWatches(err) {
 		t.Errorf("This error does not concern inotify limits: %#v", err)
 	}
 
-	err = watchesLimitTooLowError("test-folder")
+	err = reachedMaxUserWatchesError("test-folder")
 	if err.Error() != msg {
 		t.Errorf("Expected error about inotify limits, but got: %#v", err)
 	}

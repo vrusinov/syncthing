@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/syncthing/syncthing/lib/config"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/zillode/notify"
 )
 
@@ -27,7 +28,7 @@ func TestDelayMockedBackend(t *testing.T) {
 		sleepMs(200)
 		delay := time.Duration(300) * time.Millisecond
 		timer := time.NewTimer(delay)
-		for i := 0; i < 13; i++ {
+		for i := 0; i < 10; i++ {
 			<-timer.C
 			timer.Reset(delay)
 			sendEvent(t, c, file)
@@ -37,8 +38,8 @@ func TestDelayMockedBackend(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{file}, 3900, 5500},
-		expectedBatch{[]string{file}, 4900, 7000},
+		{[]string{file}, 2500, 4500},
+		{[]string{file}, 3600, 6500},
 	}
 
 	testScenarioMocked(t, "Delay", testCase, expectedBatches)
@@ -54,7 +55,7 @@ func TestChannelOverflowMockedBackend(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"."}, 900, 1500},
+		{[]string{"."}, 900, 1600},
 	}
 
 	testScenarioMocked(t, "ChannelOverflow", testCase, expectedBatches)
@@ -63,43 +64,39 @@ func TestChannelOverflowMockedBackend(t *testing.T) {
 func testScenarioMocked(t *testing.T, name string, testCase func(chan<- notify.EventInfo), expectedBatches []expectedBatch) {
 	name = name + "-mocked"
 	folderCfg := config.FolderConfiguration{
-		ID:                    name,
-		RawPath:               folderRoot,
-		FsNotificationsDelayS: testNotifyDelayS,
+		ID:              name,
+		FilesystemType:  fs.FilesystemTypeBasic,
+		Path:            folderRoot,
+		FSWatcherDelayS: testNotifyDelayS,
 	}
 	cfg := config.Configuration{
 		Folders: []config.FolderConfiguration{folderCfg},
 	}
 	wrapper := config.Wrap("", cfg)
-	fsWatcher := &fsWatcher{
-		folderID:              name,
-		notifyModelChan:       make(chan []string),
-		rootEventDir:          newEventDir(".", nil),
-		fsEventChan:           make(chan notify.EventInfo, maxFiles),
+	fsWatcher := &watcher{
+		notifyChan:            make(chan []string),
 		notifyTimerNeedsReset: false,
-		inProgress:            make(map[string]struct{}),
-		ignores:               nil,
-		ignoresUpdate:         nil,
-		resetNotifyTimerChan:  make(chan time.Duration),
+		folderIgnores:         nil,
+		folderIgnoresUpdate:   nil,
+		notifyTimerResetChan:  make(chan time.Duration),
 		stop:                  make(chan struct{}),
 		cfg:                   wrapper,
 	}
 	fsWatcher.updateConfig(folderCfg)
 	fsWatcher.notifyTimeout = testNotifyTimeout
 
-	folderRoot = fsWatcher.folderPath
-
 	abort := make(chan struct{})
+	backendEventChan := make(chan notify.EventInfo, maxFiles)
 
 	startTime := time.Now()
-	go fsWatcher.Serve()
+	go fsWatcher.mainLoop(backendEventChan)
 
 	// To allow using round numbers in expected times
 	sleepMs(10)
-	go testFsWatcherOutput(t, fsWatcher.notifyModelChan, expectedBatches, startTime, abort)
+	go testFsWatcherOutput(t, fsWatcher.notifyChan, expectedBatches, startTime, abort)
 
 	timeout := time.NewTimer(time.Duration(expectedBatches[len(expectedBatches)-1].beforeMs+100) * time.Millisecond)
-	testCase(fsWatcher.fsEventChan)
+	testCase(backendEventChan)
 	<-timeout.C
 
 	abort <- struct{}{}

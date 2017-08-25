@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -29,9 +28,9 @@ import (
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/discover"
 	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/logger"
 	"github.com/syncthing/syncthing/lib/model"
-	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/stats"
@@ -69,6 +68,7 @@ type apiService struct {
 	configChanged      chan struct{} // signals intentional listener close due to config change
 	started            chan string   // signals startup complete by sending the listener address, for testing only
 	startedOnce        chan struct{} // the service has started successfully at least once
+	cpu                rater
 
 	guiErrors logger.Recorder
 	systemLog logger.Recorder
@@ -121,7 +121,11 @@ type connectionsIntf interface {
 	Status() map[string]interface{}
 }
 
-func newAPIService(id protocol.DeviceID, cfg configIntf, httpsCertFile, httpsKeyFile, assetDir string, m modelIntf, defaultSub, diskSub events.BufferedSubscription, discoverer discover.CachingMux, connectionsService connectionsIntf, errors, systemLog logger.Recorder) *apiService {
+type rater interface {
+	Rate() float64
+}
+
+func newAPIService(id protocol.DeviceID, cfg configIntf, httpsCertFile, httpsKeyFile, assetDir string, m modelIntf, defaultSub, diskSub events.BufferedSubscription, discoverer discover.CachingMux, connectionsService connectionsIntf, errors, systemLog logger.Recorder, cpu rater) *apiService {
 	service := &apiService{
 		id:            id,
 		cfg:           cfg,
@@ -142,6 +146,7 @@ func newAPIService(id protocol.DeviceID, cfg configIntf, httpsCertFile, httpsKey
 		startedOnce:        make(chan struct{}),
 		guiErrors:          errors,
 		systemLog:          systemLog,
+		cpu:                cpu,
 	}
 
 	return service
@@ -847,35 +852,11 @@ func (s *apiService) flushResponse(resp string, w http.ResponseWriter) {
 	f.Flush()
 }
 
-// 10 second average. Magic alpha value comes from looking at EWMA package
-// definitions of EWMA1, EWMA5. The tick rate *must* be five seconds (hard
-// coded in the EWMA package).
-var cpuTickRate = 5 * time.Second
-var cpuAverage = metrics.NewEWMA(1 - math.Exp(-float64(cpuTickRate)/float64(time.Second)/10.0))
-
-func init() {
-	if !innerProcess {
-		return
-	}
-	go func() {
-		// Initialize prevUsage to an actual value returned by cpuUsage
-		// instead of zero, because at least Windows returns a huge negative
-		// number here that then slowly increments...
-		prevUsage := cpuUsage()
-		for range time.NewTicker(cpuTickRate).C {
-			curUsage := cpuUsage()
-			cpuAverage.Update(int64((curUsage - prevUsage) / time.Millisecond))
-			prevUsage = curUsage
-			cpuAverage.Tick()
-		}
-	}()
-}
-
 func (s *apiService) getSystemStatus(w http.ResponseWriter, r *http.Request) {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 
-	tilde, _ := osutil.ExpandTilde("~")
+	tilde, _ := fs.ExpandTilde("~")
 	res := make(map[string]interface{})
 	res["myID"] = myID.String()
 	res["goroutines"] = runtime.NumGoroutine()
@@ -899,7 +880,7 @@ func (s *apiService) getSystemStatus(w http.ResponseWriter, r *http.Request) {
 	res["connectionServiceStatus"] = s.connectionsService.Status()
 	// cpuUsage.Rate() is in milliseconds per second, so dividing by ten
 	// gives us percent
-	res["cpuPercent"] = cpuAverage.Rate() / 10 / float64(runtime.NumCPU())
+	res["cpuPercent"] = s.cpu.Rate() / 10 / float64(runtime.NumCPU())
 	res["pathSeparator"] = string(filepath.Separator)
 	res["uptime"] = int(time.Since(startTime).Seconds())
 	res["startTime"] = startTime
@@ -1278,23 +1259,35 @@ func (s *apiService) getPeerCompletion(w http.ResponseWriter, r *http.Request) {
 func (s *apiService) getSystemBrowse(w http.ResponseWriter, r *http.Request) {
 	qs := r.URL.Query()
 	current := qs.Get("current")
+	// Default value or in case of error unmarshalling ends up being basic fs.
+	var fsType fs.FilesystemType
+	fsType.UnmarshalText([]byte(qs.Get("filesystem")))
+
 	if current == "" {
-		if roots, err := osutil.GetFilesystemRoots(); err == nil {
+		filesystem := fs.NewFilesystem(fsType, "")
+		if roots, err := filesystem.Roots(); err == nil {
 			sendJSON(w, roots)
 		} else {
 			http.Error(w, err.Error(), 500)
 		}
 		return
 	}
-	search, _ := osutil.ExpandTilde(current)
-	pathSeparator := string(os.PathSeparator)
+	search, _ := fs.ExpandTilde(current)
+	pathSeparator := string(fs.PathSeparator)
+
 	if strings.HasSuffix(current, pathSeparator) && !strings.HasSuffix(search, pathSeparator) {
 		search = search + pathSeparator
 	}
-	subdirectories, _ := osutil.Glob(search + "*")
+	searchDir := filepath.Dir(search)
+	searchFile := filepath.Base(search)
+
+	fs := fs.NewFilesystem(fsType, searchDir)
+
+	subdirectories, _ := fs.Glob(searchFile + "*")
+
 	ret := make([]string, 0, len(subdirectories))
 	for _, subdirectory := range subdirectories {
-		info, err := os.Stat(subdirectory)
+		info, err := fs.Stat(subdirectory)
 		if err == nil && info.IsDir() {
 			ret = append(ret, subdirectory+pathSeparator)
 		}

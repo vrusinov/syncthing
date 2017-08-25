@@ -23,11 +23,12 @@ type folder struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	initialScanFinished chan struct{}
-	fsWatchChan         <-chan []string
+	fsWatcherChan       <-chan []string
 }
 
 func newFolder(model *Model, cfg config.FolderConfiguration, fsWatcher fswatcher.Service) folder {
 	ctx, cancel := context.WithCancel(context.Background())
+
 	var fsWatchChan <-chan []string
 	if fsWatcher != nil {
 		fsWatchChan = fsWatcher.C()
@@ -42,13 +43,12 @@ func newFolder(model *Model, cfg config.FolderConfiguration, fsWatcher fswatcher
 		cancel:              cancel,
 		model:               model,
 		initialScanFinished: make(chan struct{}),
-		fsWatchChan:         fsWatchChan,
+		fsWatcherChan:       fsWatchChan,
 	}
 }
 
 func (f *folder) IndexUpdated() {
 }
-
 func (f *folder) DelayScan(next time.Duration) {
 	f.scan.Delay(next)
 }

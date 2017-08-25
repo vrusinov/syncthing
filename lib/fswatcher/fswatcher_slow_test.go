@@ -20,6 +20,7 @@ import (
 
 	"github.com/syncthing/syncthing/lib/config"
 	"github.com/syncthing/syncthing/lib/events"
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/ignore"
 )
 
@@ -27,6 +28,18 @@ func TestMain(m *testing.M) {
 	if err := os.RemoveAll(testDir); err != nil {
 		panic(err)
 	}
+
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		panic("Cannot get absolute path to working dir")
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		panic("Cannot get real path to working dir")
+	}
+	testDirAbs = filepath.Join(dir, testDir)
+	testFs = fs.NewFilesystem(fs.FilesystemTypeBasic, testDirAbs)
+
 	maxFiles = 32
 	maxFilesPerDir = 8
 	defer func() {
@@ -39,7 +52,12 @@ func TestMain(m *testing.M) {
 const (
 	testDir           = "temporary_test_fswatcher"
 	testNotifyDelayS  = 1
-	testNotifyTimeout = time.Duration(3) * time.Second
+	testNotifyTimeout = time.Duration(2) * time.Second
+)
+
+var (
+	testDirAbs string
+	testFs     fs.Filesystem
 )
 
 type expectedBatch struct {
@@ -74,10 +92,10 @@ func TestTemplate(t *testing.T) {
 
 	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{file1, dir1}, 2000, 2500},
-		expectedBatch{[]string{file2}, 3000, 3500},
-		expectedBatch{[]string{oldfile}, 5400, 6500},
-		expectedBatch{[]string{file1, dir1}, 6400, 8000},
+		{[]string{file1, dir1}, 2000, 3000},
+		{[]string{file2}, 3000, 4000},
+		{[]string{oldfile}, 4200, 5500},
+		{[]string{file1, dir1}, 5200, 7000},
 	}
 
 	testScenario(t, "Template", testCase, expectedBatches)
@@ -97,12 +115,12 @@ func TestRename(t *testing.T) {
 	// the created file during renaming
 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
 		expectedBatches = []expectedBatch{
-			expectedBatch{[]string{newfile}, 900, 1900},
-			expectedBatch{[]string{oldfile}, 3900, 5000},
+			{[]string{newfile}, 900, 1900},
+			{[]string{oldfile}, 2900, 4000},
 		}
 	} else {
 		expectedBatches = []expectedBatch{
-			expectedBatch{[]string{newfile, oldfile}, 3900, 5000},
+			{[]string{newfile, oldfile}, 2900, 4000},
 		}
 	}
 
@@ -123,9 +141,8 @@ func TestAggregate(t *testing.T) {
 		}
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{parent}, 900, 1500},
+		{[]string{parent}, 900, 1600},
 	}
 
 	testScenario(t, "Aggregate", testCase, expectedBatches)
@@ -149,9 +166,8 @@ func TestAggregateParent(t *testing.T) {
 		createTestFile(t, childFile)
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{parent}, 900, 1500},
+		{[]string{parent}, 900, 1600},
 	}
 
 	testScenario(t, "AggregateParent", testCase, expectedBatches)
@@ -169,9 +185,8 @@ func TestRootAggregate(t *testing.T) {
 		}
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"."}, 900, 1500},
+		{[]string{"."}, 900, 1600},
 	}
 
 	testScenario(t, "RootAggregate", testCase, expectedBatches)
@@ -190,9 +205,8 @@ func TestRootNotAggregate(t *testing.T) {
 		}
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{files[:], 900, 2000},
+		{files[:], 900, 1600},
 	}
 
 	testScenario(t, "RootNotAggregate", testCase, expectedBatches)
@@ -213,9 +227,8 @@ func TestOverflow(t *testing.T) {
 		}
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"."}, 900, 1500},
+		{[]string{"."}, 900, 1600},
 	}
 
 	testScenario(t, "Overflow", testCase, expectedBatches)
@@ -242,9 +255,8 @@ func TestOutside(t *testing.T) {
 		}
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{dir}, 3900, 5000},
+		{[]string{dir}, 2400, 4000},
 	}
 
 	testScenario(t, "Outside", testCase, expectedBatches)
@@ -255,24 +267,23 @@ func TestUpdateIgnores(t *testing.T) {
 	stignore := `
 	a*
 	`
-	pats := ignore.New(false)
+	pats := ignore.New(testFs)
 	err := pats.Parse(bytes.NewBufferString(stignore), ".stignore")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	testCase := func(watcher Service) {
-		createTestFile(t, "afile")
+		createTestFile(t, "afirst")
 		sleepMs(1100)
 		watcher.UpdateIgnores(pats)
 		sleepMs(100)
-		deleteTestFile(t, "afile")
-		sleepMs(2000)
+		createTestFile(t, "asecond")
+		sleepMs(1600)
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"afile"}, 900, 1500},
+		{[]string{"afirst"}, 900, 1600},
 	}
 
 	testScenario(t, "UpdateIgnores", testCase, expectedBatches)
@@ -295,69 +306,56 @@ func TestInProgress(t *testing.T) {
 		sleepMs(800)
 	}
 
-	// batches that we expect to receive with time interval in milliseconds
 	expectedBatches := []expectedBatch{
-		expectedBatch{[]string{"notinprogress"}, 2000, 3500},
+		{[]string{"notinprogress"}, 2000, 3500},
 	}
 
 	testScenario(t, "TestInProgress", testCase, expectedBatches)
 }
 
 func testFsWatcher(t *testing.T, name string) Service {
-	dir, err := filepath.Abs(".")
-	if err != nil {
-		panic("Cannot get absolute path to working dir")
-	}
-	dir, err = filepath.EvalSymlinks(dir)
-	if err != nil {
-		panic("Cannot get real path to working dir")
+	folderCfg := config.FolderConfiguration{
+		ID:              name,
+		FilesystemType:  fs.FilesystemTypeBasic,
+		Path:            testDirAbs,
+		FSWatcherDelayS: testNotifyDelayS,
 	}
 	cfg := config.Configuration{
-		Folders: []config.FolderConfiguration{
-			config.FolderConfiguration{
-				ID:                    name,
-				RawPath:               filepath.Join(dir, testDir),
-				FsNotificationsDelayS: testNotifyDelayS,
-			},
-		},
+		Folders: []config.FolderConfiguration{folderCfg},
 	}
 	wrapper := config.Wrap("", cfg)
-	watcher, err := NewFsWatcher(name, wrapper, nil)
-	if err != nil {
-		t.Errorf("Starting FS notifications failed.")
-		return nil
-	}
-	watcher.(*fsWatcher).notifyTimeout = testNotifyTimeout
-	return watcher
+	testWatcher := New(folderCfg, wrapper, nil)
+	testWatcher.(*watcher).notifyTimeout = testNotifyTimeout
+	return testWatcher
 }
 
 // path relative to folder root
 func renameTestFile(t *testing.T, old string, new string) {
-	if err := os.Rename(filepath.Join(testDir, old), filepath.Join(testDir, new)); err != nil {
+	if err := testFs.Rename(old, new); err != nil {
 		panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
 	}
 }
 
 // path relative to folder root
 func deleteTestFile(t *testing.T, file string) {
-	if err := os.Remove(filepath.Join(testDir, file)); err != nil {
+	if err := testFs.Remove(file); err != nil {
 		panic(fmt.Sprintf("Failed to delete %s: %s", file, err))
 	}
 }
 
 // path relative to folder root
 func deleteTestDir(t *testing.T, dir string) {
-	if err := os.RemoveAll(filepath.Join(testDir, dir)); err != nil {
+	if err := testFs.RemoveAll(dir); err != nil {
 		panic(fmt.Sprintf("Failed to delete %s: %s", dir, err))
 	}
 }
 
 // path relative to folder root, also creates parent dirs if necessary
 func createTestFile(t *testing.T, file string) string {
-	if err := os.MkdirAll(filepath.Dir(filepath.Join(testDir, file)), 0755); err != nil {
+	if err := testFs.MkdirAll(filepath.Dir(file), 0755); err != nil {
 		panic(fmt.Sprintf("Failed to parent directory for %s: %s", file, err))
 	}
-	handle, err := os.Create(filepath.Join(testDir, file))
+	handle, err := testFs.Create(file)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create test file %s: %s", file, err))
 	}
@@ -367,7 +365,7 @@ func createTestFile(t *testing.T, file string) string {
 
 // path relative to folder root
 func createTestDir(t *testing.T, dir string) string {
-	if err := os.MkdirAll(filepath.Join(testDir, dir), 0755); err != nil {
+	if err := testFs.MkdirAll(dir, 0755); err != nil {
 		panic(fmt.Sprintf("Failed to create directory %s: %s", dir, err))
 	}
 	return dir
@@ -408,7 +406,7 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 	// they get flushed to disked with a delay.
 	initDelayMs := 500
 	if runtime.GOOS == "darwin" {
-		initDelayMs = 1000
+		initDelayMs = 900
 	}
 	sleepMs(initDelayMs)
 

@@ -17,10 +17,13 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/syncthing/syncthing/lib/fs"
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/rand"
 	"github.com/syncthing/syncthing/lib/upgrade"
@@ -29,7 +32,7 @@ import (
 
 const (
 	OldestHandledVersion = 10
-	CurrentVersion       = 21
+	CurrentVersion       = 23
 	MaxRescanIntervalS   = 365 * 24 * 60 * 60
 )
 
@@ -155,9 +158,11 @@ type Configuration struct {
 	GUI            GUIConfiguration      `xml:"gui" json:"gui"`
 	Options        OptionsConfiguration  `xml:"options" json:"options"`
 	IgnoredDevices []protocol.DeviceID   `xml:"ignoredDevice" json:"ignoredDevices"`
+	IgnoredFolders []string              `xml:"ignoredFolder" json:"ignoredFolders"`
 	XMLName        xml.Name              `xml:"configuration" json:"-"`
 
-	OriginalVersion int `xml:"-" json:"-"` // The version we read from disk, before any conversion
+	MyID            protocol.DeviceID `xml:"-" json:"-"` // Provided by the instantiator.
+	OriginalVersion int               `xml:"-" json:"-"` // The version we read from disk, before any conversion
 }
 
 func (cfg Configuration) Copy() Configuration {
@@ -181,6 +186,10 @@ func (cfg Configuration) Copy() Configuration {
 	newCfg.IgnoredDevices = make([]protocol.DeviceID, len(cfg.IgnoredDevices))
 	copy(newCfg.IgnoredDevices, cfg.IgnoredDevices)
 
+	// FolderConfiguraion.ID is type string
+	newCfg.IgnoredFolders = make([]string, len(cfg.IgnoredFolders))
+	copy(newCfg.IgnoredFolders, cfg.IgnoredFolders)
+
 	return newCfg
 }
 
@@ -197,6 +206,8 @@ func (cfg *Configuration) WriteXML(w io.Writer) error {
 
 func (cfg *Configuration) prepare(myID protocol.DeviceID) error {
 	var myName string
+
+	cfg.MyID = myID
 
 	// Ensure this device is present in the config
 	for _, device := range cfg.Devices {
@@ -235,6 +246,9 @@ func (cfg *Configuration) clean() error {
 	if cfg.IgnoredDevices == nil {
 		cfg.IgnoredDevices = []protocol.DeviceID{}
 	}
+	if cfg.IgnoredFolders == nil {
+		cfg.IgnoredFolders = []string{}
+	}
 	if cfg.Options.AlwaysLocalNets == nil {
 		cfg.Options.AlwaysLocalNets = []string{}
 	}
@@ -255,6 +269,14 @@ func (cfg *Configuration) clean() error {
 			return fmt.Errorf("duplicate folder ID %q in configuration", folder.ID)
 		}
 		seenFolders[folder.ID] = struct{}{}
+	}
+
+	// Remove ignored folders that are anyway part of the configuration.
+	for i := 0; i < len(cfg.IgnoredFolders); i++ {
+		if _, ok := seenFolders[cfg.IgnoredFolders[i]]; ok {
+			cfg.IgnoredFolders = append(cfg.IgnoredFolders[:i], cfg.IgnoredFolders[i+1:]...)
+			i-- // IgnoredFolders[i] now points to something else, so needs to be rechecked
+		}
 	}
 
 	cfg.Options.ListenAddresses = util.UniqueStrings(cfg.Options.ListenAddresses)
@@ -297,6 +319,12 @@ func (cfg *Configuration) clean() error {
 	}
 	if cfg.Version == 20 {
 		convertV20V21(cfg)
+	}
+	if cfg.Version == 21 {
+		convertV21V22(cfg)
+	}
+	if cfg.Version == 22 {
+		convertV22V23(cfg)
 	}
 
 	// Build a list of available devices
@@ -347,9 +375,48 @@ func (cfg *Configuration) clean() error {
 	return nil
 }
 
-func convertV20V21(cfg *Configuration) {
+func convertV22V23(cfg *Configuration) {
 	for i := range cfg.Folders {
-		cfg.Folders[i].FsNotificationsDelayS = 10
+		cfg.Folders[i].FSWatcherDelayS = 10
+	}
+
+	cfg.Version = 23
+}
+
+func convertV21V22(cfg *Configuration) {
+	for i := range cfg.Folders {
+		cfg.Folders[i].FilesystemType = fs.FilesystemTypeBasic
+		// Migrate to templated external versioner commands
+		if cfg.Folders[i].Versioning.Type == "external" {
+			cfg.Folders[i].Versioning.Params["command"] += " %FOLDER_PATH% %FILE_PATH%"
+		}
+	}
+
+	cfg.Version = 22
+}
+
+func convertV20V21(cfg *Configuration) {
+	for _, folder := range cfg.Folders {
+		if folder.FilesystemType != fs.FilesystemTypeBasic {
+			continue
+		}
+		switch folder.Versioning.Type {
+		case "simple", "trashcan":
+			// Clean out symlinks in the known place
+			cleanSymlinks(folder.Filesystem(), ".stversions")
+		case "staggered":
+			versionDir := folder.Versioning.Params["versionsPath"]
+			if versionDir == "" {
+				// default place
+				cleanSymlinks(folder.Filesystem(), ".stversions")
+			} else if filepath.IsAbs(versionDir) {
+				// absolute
+				cleanSymlinks(fs.NewFilesystem(fs.FilesystemTypeBasic, versionDir), ".")
+			} else {
+				// relative to folder
+				cleanSymlinks(folder.Filesystem(), versionDir)
+			}
+		}
 	}
 
 	cfg.Version = 21
@@ -391,9 +458,7 @@ func convertV17V18(cfg *Configuration) {
 }
 
 func convertV16V17(cfg *Configuration) {
-	for i := range cfg.Folders {
-		cfg.Folders[i].Fsync = true
-	}
+	// Fsync = true removed
 
 	cfg.Version = 17
 }
@@ -631,4 +696,24 @@ loop:
 		i++
 	}
 	return devices[0:count]
+}
+
+func cleanSymlinks(filesystem fs.Filesystem, dir string) {
+	if runtime.GOOS == "windows" {
+		// We don't do symlinks on Windows. Additionally, there may
+		// be things that look like symlinks that are not, which we
+		// should leave alone. Deduplicated files, for example.
+		return
+	}
+	filesystem.Walk(dir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsSymlink() {
+			l.Infoln("Removing incorrectly versioned symlink", path)
+			filesystem.Remove(path)
+			return fs.SkipDir
+		}
+		return nil
+	})
 }
