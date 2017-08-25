@@ -98,10 +98,8 @@ func testScenarioMocked(t *testing.T, name string, testCase func(chan<- notify.E
 	timeout := time.NewTimer(time.Duration(expectedBatches[len(expectedBatches)-1].beforeMs+100) * time.Millisecond)
 	testCase(backendEventChan)
 	<-timeout.C
-
-	abort <- struct{}{}
 	fsWatcher.Stop()
-	<-abort
+	abort <- struct{}{}
 }
 
 type fakeEventInfo string

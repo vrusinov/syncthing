@@ -425,16 +425,13 @@ func testScenario(t *testing.T, name string, testCase func(watcher Service), exp
 	timeout := time.NewTimer(time.Duration(expectedBatches[len(expectedBatches)-1].beforeMs+100) * time.Millisecond)
 	testCase(fsWatcher)
 	<-timeout.C
-
-	abort <- struct{}{}
 	fsWatcher.Stop()
 	os.RemoveAll(testDir)
-	<-abort
+	abort <- struct{}{}
+	sleepMs(initDelayMs)
 }
 
 func testFsWatcherOutput(t *testing.T, fsWatchChan <-chan []string, expectedBatches []expectedBatch, startTime time.Time, abort chan struct{}) {
-	var received []string
-	var elapsedTime time.Duration
 	batchIndex := 0
 	for {
 		select {
@@ -442,29 +439,30 @@ func testFsWatcherOutput(t *testing.T, fsWatchChan <-chan []string, expectedBatc
 			if batchIndex != len(expectedBatches) {
 				t.Errorf("Received only %d batches (%d expected)", batchIndex, len(expectedBatches))
 			}
-			abort <- struct{}{}
 			return
-		case received = <-fsWatchChan:
+		case received, ok := <-fsWatchChan:
+			if batchIndex >= len(expectedBatches) {
+				// Receiving because fsWatchChan was closed is fine
+				if ok {
+					t.Errorf("Received batch %d (only %d expected)", batchIndex+1, len(expectedBatches))
+				}
+				continue
+			}
+
+			elapsedTime := time.Since(startTime)
+			expected := expectedBatches[batchIndex]
+			switch {
+			case elapsedTime < durationMs(expected.afterMs):
+				t.Errorf("Received batch %d after %v (too soon)", batchIndex+1, elapsedTime)
+
+			case elapsedTime > durationMs(expected.beforeMs):
+				t.Errorf("Received batch %d after %v (too late)", batchIndex+1, elapsedTime)
+
+			case len(received) != len(expected.paths):
+				t.Errorf("Received %v events instead of %v for batch %v", len(received), len(expected.paths), batchIndex+1)
+			}
+			compareBatchToExpected(t, received, expected.paths, batchIndex)
+			batchIndex++
 		}
-
-		if batchIndex >= len(expectedBatches) {
-			t.Errorf("Received batch %d (only %d expected)", batchIndex+1, len(expectedBatches))
-			continue
-		}
-
-		elapsedTime = time.Since(startTime)
-		expected := expectedBatches[batchIndex]
-		switch {
-		case elapsedTime < durationMs(expected.afterMs):
-			t.Errorf("Received batch %d after %v (too soon)", batchIndex+1, elapsedTime)
-
-		case elapsedTime > durationMs(expected.beforeMs):
-			t.Errorf("Received batch %d after %v (too late)", batchIndex+1, elapsedTime)
-
-		case len(received) != len(expected.paths):
-			t.Errorf("Received %v events instead of %v for batch %v", len(received), len(expected.paths), batchIndex+1)
-		}
-		compareBatchToExpected(t, received, expected.paths, batchIndex)
-		batchIndex++
 	}
 }
