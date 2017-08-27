@@ -343,12 +343,11 @@ func (r *readdcw) loop() {
 			}
 		}
 		r.loopstate(overEx)
-		}
 	}
 }
 
 // TODO(pknap) : doc
-func (r *readdcw) loopstate(overEx *overlappedEx, filter uint32) {
+func (r *readdcw) loopstate(overEx *overlappedEx) {
 	r.Lock()
 	defer r.Unlock()
 	filter := atomic.LoadUint32(&overEx.parent.parent.filter)
