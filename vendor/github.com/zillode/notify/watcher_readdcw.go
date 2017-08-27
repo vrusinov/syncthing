@@ -335,25 +335,20 @@ func (r *readdcw) loop() {
 			continue
 		}
 		overEx := (*overlappedEx)(unsafe.Pointer(overlapped))
-		if n == 0 {
-			r.loopstate(overEx)
-		} else {
-			filter := atomic.LoadUint32(&overEx.parent.parent.filter)
-			if filter&onlyMachineStates == stateUnwatch {
-				dbgprintf("loop: n != 0 but stateUnwatch")
-				return
-			}
+		if n != 0 {
 			r.loopevent(n, overEx)
 			if err = overEx.parent.readDirChanges(); err != nil {
 				dbgprintf("loop: readDirChanges failed:", err)
 				// TODO: error handling
 			}
 		}
+		r.loopstate(overEx)
+		}
 	}
 }
 
 // TODO(pknap) : doc
-func (r *readdcw) loopstate(overEx *overlappedEx) {
+func (r *readdcw) loopstate(overEx *overlappedEx, filter uint32) {
 	r.Lock()
 	defer r.Unlock()
 	filter := atomic.LoadUint32(&overEx.parent.parent.filter)
