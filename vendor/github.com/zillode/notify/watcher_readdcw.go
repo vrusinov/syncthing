@@ -340,6 +340,7 @@ func (r *readdcw) loop() {
 		} else {
 			r.loopevent(n, overEx)
 			if err = overEx.parent.readDirChanges(); err != nil {
+				dbgprintf("loop: readDirChanges on %v failed:", syscall.UTF16ToString(overEx.parent.pathw), err)
 				// TODO: error handling
 			}
 		}
@@ -352,15 +353,19 @@ func (r *readdcw) loopstate(overEx *overlappedEx) {
 	defer r.Unlock()
 	filter := atomic.LoadUint32(&overEx.parent.parent.filter)
 	if filter&onlyMachineStates == 0 {
+		dbgprintf("loopstate: no machine states: %v", syscall.UTF16ToString(overEx.parent.pathw))
 		return
 	}
 	if overEx.parent.parent.count--; overEx.parent.parent.count == 0 {
 		switch filter & onlyMachineStates {
 		case stateRewatch:
+			dbgprintf("loopstate: stateRewatch: %v", syscall.UTF16ToString(overEx.parent.pathw))
 			overEx.parent.parent.recreate(r.cph)
 		case stateUnwatch:
+			dbgprintf("loopstate: stateUnwatch: %v", syscall.UTF16ToString(overEx.parent.pathw))
 			delete(r.m, syscall.UTF16ToString(overEx.parent.pathw))
 		case stateCPClose:
+			dbgprintf("loopstate: stateCPClose: %v", syscall.UTF16ToString(overEx.parent.pathw))
 		default:
 			panic(`notify: windows loopstate logic error`)
 		}
@@ -387,6 +392,7 @@ func (r *readdcw) loopevent(n uint32, overEx *overlappedEx) {
 			break
 		}
 	}
+	dbgprintf("loopevent: %s", syscall.UTF16ToString(overEx.parent.pathw))
 	r.send(events)
 }
 
