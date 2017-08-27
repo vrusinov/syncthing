@@ -19,6 +19,7 @@ var dbgcallstack func(max int) []string
 
 func init() {
 	if _, ok := os.LookupEnv("NOTIFYDEBUG"); ok || debugTag {
+		log.SetOutput(os.Stdout)
 		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 		dbgprint = func(v ...interface{}) {
 			v = append([]interface{}{"[D] "}, v...)
