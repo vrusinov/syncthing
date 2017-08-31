@@ -22,7 +22,7 @@ import (
 const readBufferSize = 4096
 
 // Since all operations which go through the Windows completion routine are done
-// asynchronously, filter may set one of the constants below. They were defined
+// asynchronously, filter may set one of the constants belor. They were defined
 // in order to distinguish whether current folder should be re-registered in
 // ReadDirectoryChangesW function or some control operations need to be executed.
 const (
@@ -286,12 +286,16 @@ func (r *readdcw) watch(path string, event Event, recursive bool) (err error) {
 		r.Lock()
 		defer r.Unlock()
 		if wd, ok = r.m[path]; ok {
+			dbgprint("watch: exists already")
 			return
 		}
 		if wd, err = newWatched(r.cph, uint32(event), recursive, path); err != nil {
 			return
 		}
 		r.m[path] = wd
+		dbgprint("watch: new watch added")
+	} else {
+		dbgprint("watch: exists already")
 	}
 	return nil
 }
@@ -338,7 +342,6 @@ func (r *readdcw) loop() {
 		if n != 0 {
 			r.loopevent(n, overEx)
 			if err = overEx.parent.readDirChanges(); err != nil {
-				dbgprintf("loop: readDirChanges failed:", err)
 				// TODO: error handling
 			}
 		}
@@ -352,19 +355,17 @@ func (r *readdcw) loopstate(overEx *overlappedEx) {
 	defer r.Unlock()
 	filter := atomic.LoadUint32(&overEx.parent.parent.filter)
 	if filter&onlyMachineStates == 0 {
-		dbgprintf("loopstate: no machine states")
 		return
 	}
 	if overEx.parent.parent.count--; overEx.parent.parent.count == 0 {
 		switch filter & onlyMachineStates {
 		case stateRewatch:
-			dbgprintf("loopstate: stateRewatch")
+			dbgprint("loopstate rewatch")
 			overEx.parent.parent.recreate(r.cph)
 		case stateUnwatch:
-			dbgprintf("loopstate: stateUnwatch")
+			dbgprint("loopstate unwatch")
 			delete(r.m, syscall.UTF16ToString(overEx.parent.pathw))
 		case stateCPClose:
-			dbgprintf("loopstate: stateCPClose")
 		default:
 			panic(`notify: windows loopstate logic error`)
 		}
@@ -384,7 +385,6 @@ func (r *readdcw) loopevent(n uint32, overEx *overlappedEx) {
 			action: raw.Action,
 			name:   name,
 		})
-		dbgprintf("loopevent: event name: %s", name)
 		if raw.NextEntryOffset == 0 {
 			break
 		}
@@ -452,7 +452,7 @@ func (r *readdcw) rewatch(path string, oldevent, newevent uint32, recursive bool
 	var wd *watched
 	r.Lock()
 	defer r.Unlock()
-	if wd, err = r.nonStateWatchedLocked(path); err != nil {
+	if wd, err = r.nonStateWatched(path); err != nil {
 		return
 	}
 	if wd.filter&(onlyNotifyChanges|onlyNGlobalEvents) != oldevent {
@@ -469,7 +469,7 @@ func (r *readdcw) rewatch(path string, oldevent, newevent uint32, recursive bool
 }
 
 // TODO : pknap
-func (r *readdcw) nonStateWatchedLocked(path string) (wd *watched, err error) {
+func (r *readdcw) nonStateWatched(path string) (wd *watched, err error) {
 	wd, ok := r.m[path]
 	if !ok || wd == nil {
 		err = errors.New(`notify: ` + path + ` path is unwatched`)
@@ -497,13 +497,24 @@ func (r *readdcw) unwatch(path string) (err error) {
 	var wd *watched
 	r.Lock()
 	defer r.Unlock()
-	if wd, err = r.nonStateWatchedLocked(path); err != nil {
+	if wd, err = r.nonStateWatched(path); err != nil {
 		return
 	}
 	wd.filter |= stateUnwatch
 	if err = wd.closeHandle(); err != nil {
 		wd.filter &^= stateUnwatch
 		return
+	}
+	if _, attrErr := syscall.GetFileAttributes(&wd.pathw[0]); attrErr != nil {
+		for _, g := range wd.digrip {
+			if g != nil {
+				dbgprint("unwatch: posting")
+				if err = syscall.PostQueuedCompletionStatus(r.cph, 0, 0, (*syscall.Overlapped)(unsafe.Pointer(g.ovlapped))); err != nil {
+					wd.filter &^= stateUnwatch
+					return
+				}
+			}
+		}
 	}
 	return
 }

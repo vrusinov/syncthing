@@ -153,8 +153,7 @@ func (t *recursiveTree) dispatch() {
 }
 
 // Watch TODO(rjeczalik)
-func (t *recursiveTree) Watch(path string, c chan<- EventInfo,
-	doNotWatch func(string) bool, events ...Event) error {
+func (t *recursiveTree) Watch(path string, c chan<- EventInfo, events ...Event) error {
 	if c == nil {
 		panic("notify: Watch using nil channel")
 	}
