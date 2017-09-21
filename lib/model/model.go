@@ -26,7 +26,6 @@ import (
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
-	"github.com/syncthing/syncthing/lib/fswatcher"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -35,6 +34,7 @@ import (
 	"github.com/syncthing/syncthing/lib/sync"
 	"github.com/syncthing/syncthing/lib/upgrade"
 	"github.com/syncthing/syncthing/lib/versioner"
+	"github.com/syncthing/syncthing/lib/watchaggregator"
 	"github.com/syncthing/syncthing/lib/weakhash"
 	"github.com/thejerf/suture"
 )
@@ -51,6 +51,7 @@ type service interface {
 	IndexUpdated()              // Remote index was updated notification
 	Jobs() ([]string, []string) // In progress, Queued
 	Scan(subs []string) error
+	WatchChan() chan<- []string
 	Serve()
 	Stop()
 
@@ -80,18 +81,17 @@ type Model struct {
 	clientName    string
 	clientVersion string
 
-	folderCfgs         map[string]config.FolderConfiguration                  // folder -> cfg
-	folderFs           map[string]fs.Filesystem                               // folder -> fs
-	folderFiles        map[string]*db.FileSet                                 // folder -> files
-	folderDevices      folderDeviceSet                                        // folder -> deviceIDs
-	deviceFolders      map[protocol.DeviceID][]string                         // deviceID -> folders
-	deviceStatRefs     map[protocol.DeviceID]*stats.DeviceStatisticsReference // deviceID -> statsRef
-	folderIgnores      map[string]*ignore.Matcher                             // folder -> matcher object
-	folderRunners      map[string]service                                     // folder -> puller or scanner
-	folderRunnerTokens map[string][]suture.ServiceToken                       // folder -> tokens for puller or scanner
-	folderStatRefs     map[string]*stats.FolderStatisticsReference            // folder -> statsRef
-	folderFSWatchers   map[string]fswatcher.Service                           // folder -> filesystem watcher
-	fmut               sync.RWMutex                                           // protects the above
+	folderCfgs               map[string]config.FolderConfiguration                  // folder -> cfg
+	folderFiles              map[string]*db.FileSet                                 // folder -> files
+	folderDevices            folderDeviceSet                                        // folder -> deviceIDs
+	deviceFolders            map[protocol.DeviceID][]string                         // deviceID -> folders
+	deviceStatRefs           map[protocol.DeviceID]*stats.DeviceStatisticsReference // deviceID -> statsRef
+	folderIgnores            map[string]*ignore.Matcher                             // folder -> matcher object
+	folderRunners            map[string]service                                     // folder -> puller or scanner
+	folderRunnerTokens       map[string][]suture.ServiceToken                       // folder -> tokens for puller or scanner
+	folderStatRefs           map[string]*stats.FolderStatisticsReference            // folder -> statsRef
+	folderWatcherCancelFuncs map[string]context.CancelFunc                          // folder -> function to cancel fs watch and aggregation
+	fmut                     sync.RWMutex                                           // protects the above
 
 	conn                map[protocol.DeviceID]connections.Connection
 	closed              map[protocol.DeviceID]chan struct{}
@@ -101,7 +101,7 @@ type Model struct {
 	pmut                sync.RWMutex                   // protects the above
 }
 
-type folderFactory func(*Model, config.FolderConfiguration, versioner.Versioner, fs.Filesystem, fswatcher.Service) service
+type folderFactory func(*Model, config.FolderConfiguration, versioner.Versioner, fs.Filesystem) service
 
 var (
 	folderFactories = make(map[config.FolderType]folderFactory, 0)
@@ -128,27 +128,26 @@ func NewModel(cfg *config.Wrapper, id protocol.DeviceID, clientName, clientVersi
 				l.Debugln(line)
 			},
 		}),
-		cfg:                 cfg,
-		db:                  ldb,
-		finder:              db.NewBlockFinder(ldb),
-		progressEmitter:     NewProgressEmitter(cfg),
-		id:                  id,
-		shortID:             id.Short(),
-		cacheIgnoredFiles:   cfg.Options().CacheIgnoredFiles,
-		protectedFiles:      protectedFiles,
-		clientName:          clientName,
-		clientVersion:       clientVersion,
-		folderCfgs:          make(map[string]config.FolderConfiguration),
-		folderFs:            make(map[string]fs.Filesystem),
-		folderFiles:         make(map[string]*db.FileSet),
-		folderDevices:       make(folderDeviceSet),
-		deviceFolders:       make(map[protocol.DeviceID][]string),
-		deviceStatRefs:      make(map[protocol.DeviceID]*stats.DeviceStatisticsReference),
-		folderIgnores:       make(map[string]*ignore.Matcher),
-		folderRunners:       make(map[string]service),
-		folderRunnerTokens:  make(map[string][]suture.ServiceToken),
-		folderStatRefs:      make(map[string]*stats.FolderStatisticsReference),
-		folderFSWatchers:    make(map[string]fswatcher.Service),
+		cfg:                      cfg,
+		db:                       ldb,
+		finder:                   db.NewBlockFinder(ldb),
+		progressEmitter:          NewProgressEmitter(cfg),
+		id:                       id,
+		shortID:                  id.Short(),
+		cacheIgnoredFiles:        cfg.Options().CacheIgnoredFiles,
+		protectedFiles:           protectedFiles,
+		clientName:               clientName,
+		clientVersion:            clientVersion,
+		folderCfgs:               make(map[string]config.FolderConfiguration),
+		folderFiles:              make(map[string]*db.FileSet),
+		folderDevices:            make(folderDeviceSet),
+		deviceFolders:            make(map[protocol.DeviceID][]string),
+		deviceStatRefs:           make(map[protocol.DeviceID]*stats.DeviceStatisticsReference),
+		folderIgnores:            make(map[string]*ignore.Matcher),
+		folderRunners:            make(map[string]service),
+		folderRunnerTokens:       make(map[string][]suture.ServiceToken),
+		folderStatRefs:           make(map[string]*stats.FolderStatisticsReference),
+		folderWatcherCancelFuncs: make(map[string]context.CancelFunc),
 		conn:                make(map[protocol.DeviceID]connections.Connection),
 		closed:              make(map[protocol.DeviceID]chan struct{}),
 		helloMessages:       make(map[protocol.DeviceID]protocol.HelloResult),
@@ -256,16 +255,20 @@ func (m *Model) startFolderLocked(folder string) config.FolderType {
 		}
 	}
 
-	var fsWatcher fswatcher.Service
-	if cfg.FSWatcherEnabled {
-		fsWatcher = fswatcher.New(cfg, m.cfg, m.folderIgnores[folder])
-		m.folderFSWatchers[folder] = fsWatcher
-		token := m.Add(fsWatcher)
-		m.folderRunnerTokens[folder] = append(m.folderRunnerTokens[folder], token)
-	}
+	ffs := fs.MtimeFS()
 
-	p := folderFactory(m, cfg, ver, fs.MtimeFS(), fsWatcher)
+	// These are our metadata files, and they should always be hidden.
+	ffs.Hide(".stfolder")
+	ffs.Hide(".stversions")
+	ffs.Hide(".stignore")
+
+	p := folderFactory(m, cfg, ver, ffs)
+
 	m.folderRunners[folder] = p
+
+	if cfg.FSWatcherEnabled {
+		m.startWatcherLocked(folder)
+	}
 
 	m.warnAboutOverwritingProtectedFiles(folder)
 
@@ -345,9 +348,16 @@ func (m *Model) RemoveFolder(folder string) {
 	m.pmut.Lock()
 
 	// Delete syncthing specific files
-	folderCfg := m.folderCfgs[folder]
+	folderCfg, ok := m.folderCfgs[folder]
+	if !ok {
+		// Folder might be paused
+		folderCfg, ok = m.cfg.Folder(folder)
+	}
+	if !ok {
+		panic("bug: remove non existing folder")
+	}
 	fs := folderCfg.Filesystem()
-	fs.Remove(".stfolder")
+	fs.RemoveAll(".stfolder")
 
 	m.tearDownFolderLocked(folder)
 	// Remove it from the database
@@ -370,6 +380,10 @@ func (m *Model) tearDownFolderLocked(folder string) {
 		}
 	}
 
+	if watchCancel, ok := m.folderWatcherCancelFuncs[folder]; ok {
+		watchCancel()
+	}
+
 	// Clean up our config maps
 	delete(m.folderCfgs, folder)
 	delete(m.folderFiles, folder)
@@ -378,7 +392,6 @@ func (m *Model) tearDownFolderLocked(folder string) {
 	delete(m.folderRunners, folder)
 	delete(m.folderRunnerTokens, folder)
 	delete(m.folderStatRefs, folder)
-	delete(m.folderFSWatchers, folder)
 	for dev, folders := range m.deviceFolders {
 		m.deviceFolders[dev] = stringSliceWithout(folders, folder)
 	}
@@ -1168,7 +1181,7 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 	// acceptable relative to "folderPath" and in canonical form, so we can
 	// trust it.
 
-	if ignore.IsInternal(name) {
+	if fs.IsInternal(name) {
 		l.Debugf("%v REQ(in) for internal file: %s: %q / %q o=%d s=%d", m, deviceID, folder, name, offset, len(buf))
 		return protocol.ErrNoSuchFile
 	}
@@ -1186,7 +1199,7 @@ func (m *Model) Request(deviceID protocol.DeviceID, folder, name string, offset 
 	// Only check temp files if the flag is set, and if we are set to advertise
 	// the temp indexes.
 	if fromTemporary && !folderCfg.DisableTempIndexes {
-		tempFn := ignore.TempName(name)
+		tempFn := fs.TempName(name)
 
 		if info, err := folderFs.Lstat(tempFn); err != nil || !info.IsRegular() {
 			// Reject reads for anything that doesn't exist or is something
@@ -1262,25 +1275,28 @@ func (m *Model) GetIgnores(folder string) ([]string, []string, error) {
 	defer m.fmut.RUnlock()
 
 	cfg, ok := m.folderCfgs[folder]
-	if ok {
-		if !cfg.HasMarker() {
-			return nil, nil, fmt.Errorf("Folder %s stopped", folder)
+	if !ok {
+		cfg, ok = m.cfg.Folders()[folder]
+		if !ok {
+			return nil, nil, fmt.Errorf("Folder %s does not exist", folder)
 		}
+	}
 
-		ignores := m.folderIgnores[folder]
+	if err := m.checkFolderPath(cfg); err != nil {
+		return nil, nil, err
+	}
 
+	ignores, ok := m.folderIgnores[folder]
+	if ok {
 		return ignores.Lines(), ignores.Patterns(), nil
 	}
 
-	if cfg, ok := m.cfg.Folders()[folder]; ok {
-		matcher := ignore.New(cfg.Filesystem())
-		if err := matcher.Load(".stignore"); err != nil {
-			return nil, nil, err
-		}
-		return matcher.Lines(), matcher.Patterns(), nil
+	ignores = ignore.New(fs.NewFilesystem(cfg.FilesystemType, cfg.Path))
+	if err := ignores.Load(".stignore"); err != nil && !fs.IsNotExist(err) {
+		return nil, nil, err
 	}
 
-	return nil, nil, fmt.Errorf("Folder %s does not exist", folder)
+	return ignores.Lines(), ignores.Patterns(), nil
 }
 
 func (m *Model) SetIgnores(folder string, content []string) error {
@@ -1767,10 +1783,11 @@ func (m *Model) internalScanFolderSubdirs(ctx context.Context, folder string, su
 			l.Debugln("Folder", folder, "ignore patterns changed; triggering puller")
 			runner.IndexUpdated()
 			m.fmut.Lock()
-			fsWatcher, ok := m.folderFSWatchers[folder]
+			watchCancel, ok := m.folderWatcherCancelFuncs[folder]
 			m.fmut.Unlock()
 			if ok {
-				fsWatcher.UpdateIgnores(ignores)
+				watchCancel()
+				m.startWatcherLocked(folder)
 			}
 		}
 	}()
@@ -2317,12 +2334,8 @@ func (m *Model) checkFreeSpace(req config.Size, fs fs.Filesystem) error {
 	}
 
 	usage, err := fs.Usage(".")
-	if err != nil {
-		return fmt.Errorf("failed to check available storage space")
-	}
-
 	if req.Percentage() {
-		freePct := (1 - float64(usage.Free)/float64(usage.Total)) * 100
+		freePct := (float64(usage.Free) / float64(usage.Total)) * 100
 		if err == nil && freePct < val {
 			return fmt.Errorf("insufficient space in %v %v: %f %% < %v", fs.Type(), fs.URI(), freePct, req)
 		}
@@ -2479,6 +2492,18 @@ func (m *Model) CommitConfiguration(from, to config.Configuration) bool {
 	return true
 }
 
+func (m *Model) startWatcherLocked(folder string) {
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	cfg := m.folderCfgs[folder]
+	eventChan, err := cfg.Filesystem().Watch(".", m.folderIgnores[folder], ctx, cfg.IgnorePerms)
+	if err != nil {
+		l.Warnf("Failed to start filesystem watcher for folder %s: %v", cfg.Description(), err)
+	} else {
+		go watchaggregator.Aggregate(eventChan, m.folderRunners[folder].WatchChan(), cfg, m.cfg, ctx)
+		m.folderWatcherCancelFuncs[folder] = cancelFunc
+	}
+}
+
 // mapFolders returns a map of folder ID to folder configuration for the given
 // slice of folder configurations.
 func mapFolders(folders []config.FolderConfiguration) map[string]config.FolderConfiguration {
@@ -2571,7 +2596,7 @@ func unifySubs(dirs []string, exists func(dir string) bool) []string {
 func trimUntilParentKnown(dirs []string, exists func(dir string) bool) []string {
 	var subs []string
 	for _, sub := range dirs {
-		for sub != "" && !ignore.IsInternal(sub) {
+		for sub != "" && !fs.IsInternal(sub) {
 			sub = filepath.Clean(sub)
 			parent := filepath.Dir(sub)
 			if parent == "." || exists(parent) {

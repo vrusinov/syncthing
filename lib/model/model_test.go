@@ -1026,7 +1026,8 @@ func changeIgnores(t *testing.T, m *Model, expected []string) {
 
 func TestIgnores(t *testing.T) {
 	// Assure a clean start state
-	ioutil.WriteFile("testdata/.stfolder", nil, 0644)
+	os.RemoveAll("testdata/.stfolder")
+	os.MkdirAll("testdata/.stfolder", 0644)
 	ioutil.WriteFile("testdata/.stignore", []byte(".*\nquux\n"), 0644)
 
 	db := db.OpenMemory()
@@ -1083,6 +1084,11 @@ func TestIgnores(t *testing.T) {
 	// added to the model and thus there is no initial scan happening.
 
 	changeIgnores(t, m, expected)
+
+	// Make sure no .stignore file is considered valid
+	os.Rename("testdata/.stignore", "testdata/.stignore.bak")
+	changeIgnores(t, m, []string{})
+	os.Rename("testdata/.stignore.bak", "testdata/.stignore")
 }
 
 func TestROScanRecovery(t *testing.T) {
@@ -1896,6 +1902,52 @@ func TestIssue3164(t *testing.T) {
 	}
 }
 
+func TestIssue4357(t *testing.T) {
+	db := db.OpenMemory()
+	m := NewModel(defaultConfig, protocol.LocalDeviceID, "syncthing", "dev", db, nil)
+	m.ServeBackground()
+	defer m.Stop()
+	cfg := m.cfg.RawCopy()
+	m.CommitConfiguration(config.Configuration{}, cfg)
+
+	if _, ok := m.folderCfgs["default"]; !ok {
+		t.Error("Folder should be running")
+	}
+
+	newCfg := m.cfg.RawCopy()
+	newCfg.Folders[0].Paused = true
+	m.CommitConfiguration(cfg, newCfg)
+
+	if _, ok := m.folderCfgs["default"]; ok {
+		t.Error("Folder should not be running")
+	}
+
+	// Should not panic when removing a paused folder.
+	m.RemoveFolder("default")
+
+	// Add the folder back, should be running
+	m.CommitConfiguration(config.Configuration{}, cfg)
+
+	if _, ok := m.folderCfgs["default"]; !ok {
+		t.Error("Folder should be running")
+	}
+
+	// Should not panic when removing a running folder.
+	m.RemoveFolder("default")
+	if _, ok := m.folderCfgs["default"]; ok {
+		t.Error("Folder should not be running")
+	}
+
+	// Should panic when removing a non-existing folder
+	defer func() {
+		if recover() == nil {
+			t.Error("expected a panic")
+		}
+	}()
+	m.RemoveFolder("non-existing")
+
+}
+
 func TestScanNoDatabaseWrite(t *testing.T) {
 	// When scanning, nothing should be committed to database unless
 	// something actually changed.
@@ -2367,20 +2419,10 @@ func TestFSWatcher(t *testing.T) {
 	m.StartFolder("default")
 
 	m.fmut.RLock()
-	fsWatcher, okWatcher := m.folderFSWatchers["default"]
-	folderRunner, okFolder := m.folderRunners["default"]
+	_, okWatcher := m.folderWatcherCancelFuncs["default"]
 	m.fmut.RUnlock()
 	if !okWatcher {
 		t.Error("FSWatcher missing")
-	} else if fsWatcher == nil {
-		t.Error("m.folderFSWatcher[\"default\"] == nil")
-	}
-	if !okFolder {
-		t.Error("folderRunner missing")
-	} else if folderRunner == nil {
-		t.Error("m.folderRunners[\"default\"] == nil")
-	} else if folderRunner.(*sendReceiveFolder).fsWatcherChan == nil {
-		t.Error("fsWatcherChan == nil in folder")
 	}
 }
 
@@ -2413,27 +2455,32 @@ func (fakeAddr) String() string {
 	return "address"
 }
 
+type alwaysChangedKey struct {
+	fs   fs.Filesystem
+	name string
+}
+
 // alwaysChanges is an ignore.ChangeDetector that always returns true on Changed()
 type alwaysChanged struct {
-	seen map[string]struct{}
+	seen map[alwaysChangedKey]struct{}
 }
 
 func newAlwaysChanged() *alwaysChanged {
 	return &alwaysChanged{
-		seen: make(map[string]struct{}),
+		seen: make(map[alwaysChangedKey]struct{}),
 	}
 }
 
-func (c *alwaysChanged) Remember(name string, _ time.Time) {
-	c.seen[name] = struct{}{}
+func (c *alwaysChanged) Remember(fs fs.Filesystem, name string, _ time.Time) {
+	c.seen[alwaysChangedKey{fs, name}] = struct{}{}
 }
 
 func (c *alwaysChanged) Reset() {
-	c.seen = make(map[string]struct{})
+	c.seen = make(map[alwaysChangedKey]struct{})
 }
 
-func (c *alwaysChanged) Seen(name string) bool {
-	_, ok := c.seen[name]
+func (c *alwaysChanged) Seen(fs fs.Filesystem, name string) bool {
+	_, ok := c.seen[alwaysChangedKey{fs, name}]
 	return ok
 }
 

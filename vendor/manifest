@@ -18,6 +18,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/AudriusButkevicius/kcp-go",
+			"repository": "https://github.com/AudriusButkevicius/kcp-go",
+			"vcs": "git",
+			"revision": "d17218ba2121268b854dd84f2bb54679541c4048",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/AudriusButkevicius/pfilter",
 			"repository": "https://github.com/AudriusButkevicius/pfilter",
 			"vcs": "git",
@@ -38,14 +46,6 @@
 			"repository": "https://github.com/calmh/du",
 			"vcs": "git",
 			"revision": "dd9dc2043353249b2910b29dcfd6f6d4e64f39be",
-			"branch": "master",
-			"notests": true
-		},
-		{
-			"importpath": "github.com/calmh/luhn",
-			"repository": "https://github.com/calmh/luhn",
-			"vcs": "git",
-			"revision": "0c8388ff95fa92d4094011e5a04fc99dea3d1632",
 			"branch": "master",
 			"notests": true
 		},
@@ -379,6 +379,14 @@
 			"notests": true
 		},
 		{
+			"importpath": "github.com/templexxx/xor",
+			"repository": "https://github.com/templexxx/xor",
+			"vcs": "git",
+			"revision": "42f9c041c330b560afb991153bf183c25444bcdc",
+			"branch": "master",
+			"notests": true
+		},
+		{
 			"importpath": "github.com/thejerf/suture",
 			"repository": "https://github.com/thejerf/suture",
 			"vcs": "git",
@@ -414,14 +422,6 @@
 			"notests": true
 		},
 		{
-			"importpath": "github.com/xtaci/kcp-go",
-			"repository": "https://github.com/xtaci/kcp-go",
-			"vcs": "git",
-			"revision": "0b0731ef3f184a8985edcb4ca26a4b0598c6dc1a",
-			"branch": "master",
-			"notests": true
-		},
-		{
 			"importpath": "github.com/xtaci/smux",
 			"repository": "https://github.com/xtaci/smux",
 			"vcs": "git",
@@ -432,8 +432,10 @@
 		{
 			"importpath": "github.com/zillode/notify",
 			"repository": "https://github.com/zillode/notify",
-			"revision": "c2582a9d7e06fd326cdacc3a39f22634b6398cf9"
-			"branch": "master"
+			"vcs": "git",
+			"revision": "a8a3f01a1e23441e1049a5d965c8309da1fb4ac8",
+			"branch": "unwatch-zillode",
+			"notests": true
 		},
 		{
 			"importpath": "golang.org/x/crypto/bcrypt",

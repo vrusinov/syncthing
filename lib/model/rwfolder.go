@@ -20,7 +20,6 @@ import (
 	"github.com/syncthing/syncthing/lib/db"
 	"github.com/syncthing/syncthing/lib/events"
 	"github.com/syncthing/syncthing/lib/fs"
-	"github.com/syncthing/syncthing/lib/fswatcher"
 	"github.com/syncthing/syncthing/lib/ignore"
 	"github.com/syncthing/syncthing/lib/osutil"
 	"github.com/syncthing/syncthing/lib/protocol"
@@ -96,9 +95,9 @@ type sendReceiveFolder struct {
 	errorsMut sync.Mutex
 }
 
-func newSendReceiveFolder(model *Model, cfg config.FolderConfiguration, ver versioner.Versioner, fs fs.Filesystem, fsWatcher fswatcher.Service) service {
+func newSendReceiveFolder(model *Model, cfg config.FolderConfiguration, ver versioner.Versioner, fs fs.Filesystem) service {
 	f := &sendReceiveFolder{
-		folder: newFolder(model, cfg, fsWatcher),
+		folder: newFolder(model, cfg),
 
 		fs:        fs,
 		versioner: ver,
@@ -240,20 +239,23 @@ func (f *sendReceiveFolder) Serve() {
 					break
 				}
 
-				if tries > 10 {
+				if tries > 2 {
 					// We've tried a bunch of times to get in sync, but
 					// we're not making it. Probably there are write
 					// errors preventing us. Flag this with a warning and
 					// wait a bit longer before retrying.
-					l.Infof("Folder %q isn't making progress. Pausing puller for %v.", f.folderID, f.pause)
-					l.Debugln(f, "next pull in", f.pause)
-
 					if folderErrors := f.currentErrors(); len(folderErrors) > 0 {
+						for _, fileError := range folderErrors {
+							l.Infof("Puller (folder %v, dir %q): %v", f.Description(), fileError.Path, fileError.Err)
+						}
 						events.Default.Log(events.FolderErrors, map[string]interface{}{
 							"folder": f.folderID,
 							"errors": folderErrors,
 						})
 					}
+
+					l.Infof("Folder %v isn't making progress. Pausing puller for %v.", f.Description(), f.pause)
+					l.Debugln(f, "next pull in", f.pause)
 
 					f.pullTimer.Reset(f.pause)
 					break
@@ -266,18 +268,7 @@ func (f *sendReceiveFolder) Serve() {
 		// same time.
 		case <-f.scan.timer.C:
 			l.Debugln(f, "Scanning subdirectories")
-			err := f.scanSubdirs(nil)
-			f.scan.Reschedule()
-			select {
-			case <-f.initialScanFinished:
-			default:
-				close(f.initialScanFinished)
-				status := "Completed"
-				if err != nil {
-					status = "Failed"
-				}
-				l.Infoln(status, "initial scan (rw) of", f.Description())
-			}
+			f.scanTimerFired()
 
 		case req := <-f.scan.now:
 			req.err <- f.scanSubdirs(req.subdirs)
@@ -285,7 +276,7 @@ func (f *sendReceiveFolder) Serve() {
 		case next := <-f.scan.delay:
 			f.scan.timer.Reset(next)
 
-		case fsEvents := <-f.fsWatcherChan:
+		case fsEvents := <-f.watchChan:
 			l.Debugln(f, "filesystem notification rescan")
 			f.scanSubdirs(fsEvents)
 		}
@@ -618,7 +609,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo) {
 	case err == nil && (!info.IsDir() || info.IsSymlink()):
 		err = osutil.InWritableDir(f.fs.Remove, f.fs, file.Name)
 		if err != nil {
-			l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+			l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
 			return
 		}
@@ -649,14 +640,14 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo) {
 		if err = osutil.InWritableDir(mkdir, f.fs, file.Name); err == nil {
 			f.dbUpdates <- dbUpdateJob{file, dbUpdateHandleDir}
 		} else {
-			l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+			l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
 		}
 		return
 	// Weird error when stat()'ing the dir. Probably won't work to do
 	// anything else with it if we can't even stat() it.
 	case err != nil:
-		l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 		return
 	}
@@ -669,7 +660,7 @@ func (f *sendReceiveFolder) handleDir(file protocol.FileInfo) {
 	} else if err := f.fs.Chmod(file.Name, mode|(fs.FileMode(info.Mode())&retainBits)); err == nil {
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateHandleDir}
 	} else {
-		l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 	}
 }
@@ -706,7 +697,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo) {
 		// Index entry from a Syncthing predating the support for including
 		// the link target in the index entry. We log this as an error.
 		err = errors.New("incompatible symlink entry; rescan with newer Syncthing on source")
-		l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 		return
 	}
@@ -717,7 +708,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo) {
 		// path.
 		err = osutil.InWritableDir(f.fs.Remove, f.fs, file.Name)
 		if err != nil {
-			l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+			l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
 			return
 		}
@@ -732,7 +723,7 @@ func (f *sendReceiveFolder) handleSymlink(file protocol.FileInfo) {
 	if err = osutil.InWritableDir(createLink, f.fs, file.Name); err == nil {
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateHandleSymlink}
 	} else {
-		l.Infof("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, dir %q): %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 	}
 }
@@ -765,7 +756,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, matcher *ignore.Ma
 	files, _ := f.fs.DirNames(file.Name)
 	for _, dirFile := range files {
 		fullDirFile := filepath.Join(file.Name, dirFile)
-		if ignore.IsTemporary(dirFile) || (matcher != nil && matcher.Match(fullDirFile).IsDeletable()) {
+		if fs.IsTemporary(dirFile) || (matcher != nil && matcher.Match(fullDirFile).IsDeletable()) {
 			f.fs.RemoveAll(fullDirFile)
 		}
 	}
@@ -781,7 +772,7 @@ func (f *sendReceiveFolder) deleteDir(file protocol.FileInfo, matcher *ignore.Ma
 		// file and not a directory etc) and that the delete is handled.
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateDeleteDir}
 	} else {
-		l.Infof("Puller (folder %q, dir %q): delete: %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, dir %q): delete: %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 	}
 }
@@ -834,7 +825,7 @@ func (f *sendReceiveFolder) deleteFile(file protocol.FileInfo) {
 		// not a directory etc) and that the delete is handled.
 		f.dbUpdates <- dbUpdateJob{file, dbUpdateDeleteFile}
 	} else {
-		l.Infof("Puller (folder %q, file %q): delete: %v", f.folderID, file.Name, err)
+		l.Debugf("Puller (folder %q, file %q): delete: %v", f.folderID, file.Name, err)
 		f.newError(file.Name, err)
 	}
 }
@@ -896,7 +887,7 @@ func (f *sendReceiveFolder) renameFile(source, target protocol.FileInfo) {
 
 		err = f.shortcutFile(target)
 		if err != nil {
-			l.Infof("Puller (folder %q, file %q): rename from %q metadata: %v", f.folderID, target.Name, source.Name, err)
+			l.Debugf("Puller (folder %q, file %q): rename from %q metadata: %v", f.folderID, target.Name, source.Name, err)
 			f.newError(target.Name, err)
 			return
 		}
@@ -909,7 +900,7 @@ func (f *sendReceiveFolder) renameFile(source, target protocol.FileInfo) {
 
 		err = osutil.InWritableDir(f.fs.Remove, f.fs, source.Name)
 		if err != nil {
-			l.Infof("Puller (folder %q, file %q): delete %q after failed rename: %v", f.folderID, target.Name, source.Name, err)
+			l.Debugf("Puller (folder %q, file %q): delete %q after failed rename: %v", f.folderID, target.Name, source.Name, err)
 			f.newError(target.Name, err)
 			return
 		}
@@ -984,7 +975,7 @@ func (f *sendReceiveFolder) handleFile(file protocol.FileInfo, copyChan chan<- c
 		})
 
 		if err != nil {
-			l.Infoln("Puller: shortcut:", err)
+			l.Debugln("Puller: shortcut:", err)
 			f.newError(file.Name, err)
 		} else {
 			f.dbUpdates <- dbUpdateJob{file, dbUpdateShortcutFile}
@@ -993,28 +984,7 @@ func (f *sendReceiveFolder) handleFile(file protocol.FileInfo, copyChan chan<- c
 		return
 	}
 
-	tempName := ignore.TempName(file.Name)
-
-	if hasCurFile && !curFile.IsDirectory() && !curFile.IsSymlink() {
-		// Check that the file on disk is what we expect it to be according to
-		// the database. If there's a mismatch here, there might be local
-		// changes that we don't know about yet and we should scan before
-		// touching the file. If we can't stat the file we'll just pull it.
-		if info, err := f.fs.Lstat(file.Name); err == nil {
-			if !info.ModTime().Equal(curFile.ModTime()) || info.Size() != curFile.Size {
-				l.Debugln("file modified but not rescanned; not pulling:", file.Name)
-				// Scan() is synchronous (i.e. blocks until the scan is
-				// completed and returns an error), but a scan can't happen
-				// while we're in the puller routine. Request the scan in the
-				// background and it'll be handled when the current pulling
-				// sweep is complete. As we do retries, we'll queue the scan
-				// for this file up to ten times, but the last nine of those
-				// scans will be cheap...
-				go f.Scan([]string{file.Name})
-				return
-			}
-		}
-	}
+	tempName := fs.TempName(file.Name)
 
 	scanner.PopulateOffsets(file.Blocks)
 
@@ -1094,7 +1064,8 @@ func (f *sendReceiveFolder) handleFile(file protocol.FileInfo, copyChan chan<- c
 		available:        reused,
 		availableUpdated: time.Now(),
 		ignorePerms:      f.ignorePermissions(file),
-		version:          curFile.Version,
+		hasCurFile:       hasCurFile,
+		curFile:          curFile,
 		mut:              sync.NewRWMutex(),
 		sparse:           !f.DisableSparseFiles,
 		created:          time.Now(),
@@ -1115,7 +1086,7 @@ func (f *sendReceiveFolder) handleFile(file protocol.FileInfo, copyChan chan<- c
 func (f *sendReceiveFolder) shortcutFile(file protocol.FileInfo) error {
 	if !f.ignorePermissions(file) {
 		if err := f.fs.Chmod(file.Name, fs.FileMode(file.Permissions&0777)); err != nil {
-			l.Infof("Puller (folder %q, file %q): shortcut: chmod: %v", f.folderID, file.Name, err)
+			l.Debugf("Puller (folder %q, file %q): shortcut: chmod: %v", f.folderID, file.Name, err)
 			f.newError(file.Name, err)
 			return err
 		}
@@ -1379,6 +1350,36 @@ func (f *sendReceiveFolder) performFinish(state *sharedPullerState) error {
 		// There is an old file or directory already in place. We need to
 		// handle that.
 
+		curMode := uint32(stat.Mode())
+		if runtime.GOOS == "windows" && osutil.IsWindowsExecutable(state.file.Name) {
+			curMode |= 0111
+		}
+
+		// Check that the file on disk is what we expect it to be according to
+		// the database. If there's a mismatch here, there might be local
+		// changes that we don't know about yet and we should scan before
+		// touching the file.
+		// There is also a case where we think the file should be there, but
+		// it was removed, which is a conflict, yet creations always wins when
+		// competing with a deletion, so no need to handle that specially.
+		switch {
+		// The file reappeared from nowhere, or mtime/size has changed, fallthrough -> rescan.
+		case !state.hasCurFile || !stat.ModTime().Equal(state.curFile.ModTime()) || stat.Size() != state.curFile.Size:
+			fallthrough
+		// Permissions have changed, means the file has changed, rescan.
+		case !f.ignorePermissions(state.curFile) && state.curFile.HasPermissionBits() && !scanner.PermsEqual(state.curFile.Permissions, curMode):
+			l.Debugln("file modified but not rescanned; not finishing:", state.curFile.Name)
+			// Scan() is synchronous (i.e. blocks until the scan is
+			// completed and returns an error), but a scan can't happen
+			// while we're in the puller routine. Request the scan in the
+			// background and it'll be handled when the current pulling
+			// sweep is complete. As we do retries, we'll queue the scan
+			// for this file up to ten times, but the last nine of those
+			// scans will be cheap...
+			go f.Scan([]string{state.curFile.Name})
+			return nil
+		}
+
 		switch {
 		case stat.IsDir() || stat.IsSymlink():
 			// It's a directory or a symlink. These are not versioned or
@@ -1393,13 +1394,13 @@ func (f *sendReceiveFolder) performFinish(state *sharedPullerState) error {
 				return err
 			}
 
-		case f.inConflict(state.version, state.file.Version):
+		case f.inConflict(state.curFile.Version, state.file.Version):
 			// The new file has been changed in conflict with the existing one. We
 			// should file it away as a conflict instead of just removing or
 			// archiving. Also merge with the version vector we had, to indicate
 			// we have resolved the conflict.
 
-			state.file.Version = state.file.Version.Merge(state.version)
+			state.file.Version = state.file.Version.Merge(state.curFile.Version)
 			err = osutil.InWritableDir(func(name string) error {
 				return f.moveForConflict(name, state.file.ModifiedBy.String())
 			}, f.fs, state.file.Name)
@@ -1444,7 +1445,7 @@ func (f *sendReceiveFolder) finisherRoutine(in <-chan *sharedPullerState) {
 			}
 
 			if err != nil {
-				l.Infoln("Puller: final:", err)
+				l.Debugln("Puller: final:", err)
 				f.newError(state.file.Name, err)
 			}
 			events.Default.Log(events.ItemFinished, map[string]interface{}{
@@ -1474,13 +1475,10 @@ func (f *sendReceiveFolder) Jobs() ([]string, []string) {
 // dbUpdaterRoutine aggregates db updates and commits them in batches no
 // larger than 1000 items, and no more delayed than 2 seconds.
 func (f *sendReceiveFolder) dbUpdaterRoutine() {
-	const (
-		maxBatchSize = 1000
-		maxBatchTime = 2 * time.Second
-	)
+	const maxBatchTime = 2 * time.Second
 
-	batch := make([]dbUpdateJob, 0, maxBatchSize)
-	files := make([]protocol.FileInfo, 0, maxBatchSize)
+	batch := make([]dbUpdateJob, 0, maxBatchSizeFiles)
+	files := make([]protocol.FileInfo, 0, maxBatchSizeFiles)
 	tick := time.NewTicker(maxBatchTime)
 	defer tick.Stop()
 
@@ -1540,6 +1538,7 @@ func (f *sendReceiveFolder) dbUpdaterRoutine() {
 		files = files[:0]
 	}
 
+	batchSizeBytes := 0
 loop:
 	for {
 		select {
@@ -1551,13 +1550,16 @@ loop:
 			job.file.Sequence = 0
 			batch = append(batch, job)
 
-			if len(batch) == maxBatchSize {
+			batchSizeBytes += job.file.ProtoSize()
+			if len(batch) == maxBatchSizeFiles || batchSizeBytes > maxBatchSizeBytes {
 				handleBatch()
+				batchSizeBytes = 0
 			}
 
 		case <-tick.C:
 			if len(batch) > 0 {
 				handleBatch()
+				batchSizeBytes = 0
 			}
 		}
 	}
