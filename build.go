@@ -696,14 +696,22 @@ func clean() {
 }
 
 func gcflags() string {
+
+	sep := ":"
+	if runtime.GOOS == "windows" {
+		sep = ";"
+	}
+
+	paths := strings.Split(os.Getenv("GOPATH"), sep)
+
 	buf := new(bytes.Buffer)
-	paths := strings.Split(os.Getenv("GOPATH"), ":")
 	for i, path := range paths {
 		if i > 0 {
 			fmt.Fprintf(buf, " ")
 		}
 		fmt.Fprintf(buf, "-trimpath %s", path)
 	}
+
 	return buf.String()
 }
 
