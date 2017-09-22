@@ -696,7 +696,6 @@ func clean() {
 }
 
 func gcflags() string {
-
 	sep := ":"
 	if runtime.GOOS == "windows" {
 		sep = ";"
@@ -1111,7 +1110,7 @@ func temporaryBuildDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	hash := sha256.Sum256([]byte(wd))
+	hash := sha256.Sum256([]byte(wd + ":2")) // adding a suffix to bump the "generation" and get a new dir
 	base := fmt.Sprintf("syncthing-%x", hash[:4])
 
 	// The temp dir is taken from $STTMPDIR if set, otherwise the system
