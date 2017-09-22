@@ -403,7 +403,7 @@ func install(target target, tags []string) {
 		log.Fatal(err)
 	}
 	os.Setenv("GOBIN", filepath.Join(cwd, "bin"))
-	args := []string{"install", "-v", "-ldflags", ldflags()}
+	args := []string{"install", "-v", "-gcflags", gcflags(), "-ldflags", ldflags()}
 	if len(tags) > 0 {
 		args = append(args, "-tags", strings.Join(tags, " "))
 	}
@@ -426,7 +426,7 @@ func build(target target, tags []string) {
 	tags = append(target.tags, tags...)
 
 	rmr(target.BinaryName())
-	args := []string{"build", "-i", "-v", "-ldflags", ldflags()}
+	args := []string{"build", "-i", "-v", "-gcflags", gcflags(), "-ldflags", ldflags()}
 	if len(tags) > 0 {
 		args = append(args, "-tags", strings.Join(tags, " "))
 	}
@@ -693,6 +693,18 @@ func transifex() {
 func clean() {
 	rmr("bin")
 	rmr(filepath.Join(os.Getenv("GOPATH"), fmt.Sprintf("pkg/%s_%s/github.com/syncthing", goos, goarch)))
+}
+
+func gcflags() string {
+	buf := new(bytes.Buffer)
+	paths := strings.Split(os.Getenv("GOPATH"), ":")
+	for i, path := range paths {
+		if i > 0 {
+			fmt.Fprintf(buf, " ")
+		}
+		fmt.Fprintf(buf, "-trimpath %s", path)
+	}
+	return buf.String()
 }
 
 func ldflags() string {
