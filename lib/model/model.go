@@ -2499,8 +2499,9 @@ func (m *Model) startWatcherLocked(folder string) {
 	if err != nil {
 		l.Warnf("Failed to start filesystem watcher for folder %s: %v", cfg.Description(), err)
 	} else {
-		go watchaggregator.Aggregate(eventChan, m.folderRunners[folder].WatchChan(), cfg, m.cfg, ctx)
+		watchaggregator.Aggregate(eventChan, m.folderRunners[folder].WatchChan(), cfg, m.cfg, ctx)
 		m.folderWatcherCancelFuncs[folder] = cancelFunc
+		l.Infoln("Started filesystem watcher for folder", cfg.Description())
 	}
 }
 
