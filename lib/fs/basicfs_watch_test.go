@@ -178,7 +178,7 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 
 	go testWatchOutput(t, eventChan, expectedEvents, allowOthers, ctx, cancel)
 
-	timeout := time.NewTimer(2 * time.Second)
+	timeout := time.NewTimer(5 * time.Second)
 
 	testCase()
 
