@@ -19,7 +19,8 @@ import (
 
 // Notify does not block on sending to channel, so the channel must be buffered.
 // The actual number is magic.
-const backendBuffer = 500
+// Not meant to be changed, but must be changeable for tests
+var backendBuffer = 500
 
 func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context, ignorePerms bool) (<-chan Event, error) {
 	absName, err := f.rooted(name)
@@ -70,6 +71,7 @@ func (f *BasicFilesystem) watchLoop(absName string, backendChan chan notify.Even
 			}
 			// When next scheduling a scan, do it on the entire folder as events have been lost.
 			outChan <- Event{Name: ".", Type: NonRemove}
+			l.Debugln(f.Type(), f.URI(), "Watch: Event overflow, send \".\"")
 		}
 
 		select {
@@ -79,11 +81,21 @@ func (f *BasicFilesystem) watchLoop(absName string, backendChan chan notify.Even
 			}
 			relPath, _ := filepath.Rel(absName, ev.Path())
 			if ignore.ShouldIgnore(relPath) {
+				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
 				continue
 			}
-			outChan <- Event{Name: relPath, Type: f.eventType(ev.Event())}
+			evType := f.eventType(ev.Event())
+			select {
+			case outChan <- Event{Name: relPath, Type: evType}:
+				l.Debugln(f.Type(), f.URI(), "Watch: Sending", relPath, evType)
+			case <-ctx.Done():
+				notify.Stop(backendChan)
+				l.Debugln(f.Type(), f.URI(), "Watch: Stopped")
+				return
+			}
 		case <-ctx.Done():
 			notify.Stop(backendChan)
+			l.Debugln(f.Type(), f.URI(), "Watch: Stopped")
 			return
 		}
 	}
