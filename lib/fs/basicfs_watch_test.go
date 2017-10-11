@@ -14,7 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	// "strconv"
+	"strconv"
 	"testing"
 	"time"
 
@@ -72,29 +72,29 @@ func TestWatchIgnore(t *testing.T) {
 	testScenario(t, "Ignore", testCase, expectedEvents, false, ignored)
 }
 
-// func TestWatchRename(t *testing.T) {
-// 	old := createTestFile(t, "oldfile")
-// 	new := "newfile"
+func TestWatchRename(t *testing.T) {
+	old := createTestFile(t, "oldfile")
+	new := "newfile"
 
-// 	testCase := func() {
-// 		if err := testFs.Rename(old, new); err != nil {
-// 			panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
-// 		}
-// 	}
+	testCase := func() {
+		if err := testFs.Rename(old, new); err != nil {
+			panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
+		}
+	}
 
-// 	destEvent := Event{new, Remove}
-// 	// Only on these platforms the removed file can be differentiated from
-// 	// the created file during renaming
-// 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
-// 		destEvent = Event{new, NonRemove}
-// 	}
-// 	expectedEvents := []Event{
-// 		{old, Remove},
-// 		destEvent,
-// 	}
+	destEvent := Event{new, Remove}
+	// Only on these platforms the removed file can be differentiated from
+	// the created file during renaming
+	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
+		destEvent = Event{new, NonRemove}
+	}
+	expectedEvents := []Event{
+		{old, Remove},
+		destEvent,
+	}
 
-// 	testScenario(t, "Rename", testCase, expectedEvents, false, "")
-// }
+	testScenario(t, "Rename", testCase, expectedEvents, false, "")
+}
 
 // TestWatchOutside checks that no changes from outside the folder make it in
 func TestWatchOutside(t *testing.T) {
@@ -116,20 +116,20 @@ func TestWatchOutside(t *testing.T) {
 	backendChan <- fakeEventInfo(filepath.Join(filepath.Dir(testDirAbs), "outside"))
 }
 
-// // TestWatchOverflow checks that an event at the root is sent when maxFiles is reached
-// func TestWatchOverflow(t *testing.T) {
-// 	testCase := func() {
-// 		for i := 0; i < 5*backendBuffer; i++ {
-// 			createTestFile(t, "file"+strconv.Itoa(i))
-// 		}
-// 	}
+// TestWatchOverflow checks that an event at the root is sent when maxFiles is reached
+func TestWatchOverflow(t *testing.T) {
+	testCase := func() {
+		for i := 0; i < 5*backendBuffer; i++ {
+			createTestFile(t, "file"+strconv.Itoa(i))
+		}
+	}
 
-// 	expectedEvents := []Event{
-// 		{".", NonRemove},
-// 	}
+	expectedEvents := []Event{
+		{".", NonRemove},
+	}
 
-// 	testScenario(t, "Overflow", testCase, expectedEvents, true, "")
-// }
+	testScenario(t, "Overflow", testCase, expectedEvents, true, "")
+}
 
 func createTestDir(t *testing.T, dir string) string {
 	if err := testFs.MkdirAll(dir, 0755); err != nil {
@@ -158,14 +158,6 @@ func sleepMs(ms int) {
 func testScenario(t *testing.T, name string, testCase func(), expectedEvents []Event, allowOthers bool, ignored string) {
 	createTestDir(t, ".")
 
-	// Tests pick up the previously created files/dirs, probably because
-	// they get flushed to disk with a delay.
-	initDelayMs := 500
-	if runtime.GOOS == "darwin" {
-		initDelayMs = 900
-	}
-	sleepMs(initDelayMs)
-
 	ctx, cancel := context.WithCancel(context.Background())
 
 	eventChan, err := testFs.Watch(".", fakeMatcher{ignored}, ctx, false)
@@ -187,6 +179,14 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 	}
 
 	os.RemoveAll(testDir)
+
+	// Tests pick up the previously created files/dirs, probably because
+	// they get flushed to disk with a delay.
+	delayMs := 500
+	if runtime.GOOS == "darwin" {
+		delayMs = 900
+	}
+	sleepMs(delayMs)
 }
 
 func testWatchOutput(t *testing.T, in <-chan Event, expectedEvents []Event, allowOthers bool, ctx context.Context, cancel context.CancelFunc) {
