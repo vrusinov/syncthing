@@ -199,7 +199,6 @@ func testWatchOutput(t *testing.T, in <-chan Event, expectedEvents []Event, allo
 	var last Event
 	for {
 		if len(expected) == 0 {
-			l.Debugln("Received all events, cancelling")
 			cancel()
 			return
 		}
@@ -217,16 +216,13 @@ func testWatchOutput(t *testing.T, in <-chan Event, expectedEvents []Event, allo
 
 		if _, ok := expected[received]; !ok {
 			if allowOthers {
-				l.Debugln("Received event (allowOthers)", received)
 				sleepMs(100) // To facilitate overflow
 				continue
 			}
-			l.Debugln("Received unexpected event", received)
 			t.Errorf("Received unexpected event %v expected one of %v", received, expected)
 			cancel()
 			return
 		}
-		l.Debugln("Received event", received)
 		delete(expected, received)
 		last = received
 	}
