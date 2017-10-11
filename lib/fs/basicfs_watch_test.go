@@ -56,65 +56,65 @@ var (
 	testFs     Filesystem
 )
 
-// func TestWatchIgnore(t *testing.T) {
-// 	file := "file"
-// 	ignored := "ignored"
-
-// 	testCase := func() {
-// 		createTestFile(t, file)
-// 		createTestFile(t, ignored)
-// 	}
-
-// 	expectedEvents := []Event{
-// 		{file, NonRemove},
-// 	}
-
-// 	testScenario(t, "Ignore", testCase, expectedEvents, false, ignored)
-// }
-
-func TestWatchRename(t *testing.T) {
-	old := createTestFile(t, "oldfile")
-	new := "newfile"
+func TestWatchIgnore(t *testing.T) {
+	file := "file"
+	ignored := "ignored"
 
 	testCase := func() {
-		if err := testFs.Rename(old, new); err != nil {
-			panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
-		}
+		createTestFile(t, file)
+		createTestFile(t, ignored)
 	}
 
-	destEvent := Event{new, Remove}
-	// Only on these platforms the removed file can be differentiated from
-	// the created file during renaming
-	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
-		destEvent = Event{new, NonRemove}
-	}
 	expectedEvents := []Event{
-		{old, Remove},
-		destEvent,
+		{file, NonRemove},
 	}
 
-	testScenario(t, "Rename", testCase, expectedEvents, false, "")
+	testScenario(t, "Ignore", testCase, expectedEvents, false, ignored)
 }
 
-// TestWatchOutside checks that no changes from outside the folder make it in
-// func TestWatchOutside(t *testing.T) {
-// 	outChan := make(chan Event)
-// 	backendChan := make(chan notify.EventInfo, backendBuffer)
+// func TestWatchRename(t *testing.T) {
+// 	old := createTestFile(t, "oldfile")
+// 	new := "newfile"
 
-// 	ctx, cancel := context.WithCancel(context.Background())
+// 	testCase := func() {
+// 		if err := testFs.Rename(old, new); err != nil {
+// 			panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
+// 		}
+// 	}
 
-// 	go func() {
-// 		defer func() {
-// 			if recover() == nil {
-// 				t.Fatalf("Watch did not panic on receiving event outside of folder")
-// 			}
-// 			cancel()
-// 		}()
-// 		testFs.(*BasicFilesystem).watchLoop(testDirAbs, backendChan, outChan, fakeMatcher{}, ctx)
-// 	}()
+// 	destEvent := Event{new, Remove}
+// 	// Only on these platforms the removed file can be differentiated from
+// 	// the created file during renaming
+// 	if runtime.GOOS == "windows" || runtime.GOOS == "linux" || runtime.GOOS == "solaris" {
+// 		destEvent = Event{new, NonRemove}
+// 	}
+// 	expectedEvents := []Event{
+// 		{old, Remove},
+// 		destEvent,
+// 	}
 
-// 	backendChan <- fakeEventInfo(filepath.Join(filepath.Dir(testDirAbs), "outside"))
+// 	testScenario(t, "Rename", testCase, expectedEvents, false, "")
 // }
+
+// TestWatchOutside checks that no changes from outside the folder make it in
+func TestWatchOutside(t *testing.T) {
+	outChan := make(chan Event)
+	backendChan := make(chan notify.EventInfo, backendBuffer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("Watch did not panic on receiving event outside of folder")
+			}
+			cancel()
+		}()
+		testFs.(*BasicFilesystem).watchLoop(testDirAbs, backendChan, outChan, fakeMatcher{}, ctx)
+	}()
+
+	backendChan <- fakeEventInfo(filepath.Join(filepath.Dir(testDirAbs), "outside"))
+}
 
 // // TestWatchOverflow checks that an event at the root is sent when maxFiles is reached
 // func TestWatchOverflow(t *testing.T) {
