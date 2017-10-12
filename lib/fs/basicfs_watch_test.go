@@ -130,9 +130,10 @@ func TestWatchSubpath(t *testing.T) {
 	// testFs is Filesystem, but we need BasicFilesystem here
 	fs := newBasicFilesystem(testDirAbs)
 
-	go fs.watchLoop("sub", filepath.Join(testDirAbs, "sub"), backendChan, outChan, fakeMatcher{}, ctx)
+	abs, _ := fs.rooted("sub")
+	go fs.watchLoop("sub", abs, backendChan, outChan, fakeMatcher{}, ctx)
 
-	backendChan <- fakeEventInfo(filepath.Join(testDirAbs, "sub", "file"))
+	backendChan <- fakeEventInfo(filepath.Join(abs, "file"))
 
 	timeout := time.NewTimer(2 * time.Second)
 	select {
@@ -206,7 +207,11 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	eventChan, err := testFs.Watch(name, fakeMatcher{filepath.Join(name, ignored)}, ctx, false)
+	if ignored != "" {
+		ignored = filepath.Join(name, ignored)
+	}
+
+	eventChan, err := testFs.Watch(name, fakeMatcher{ignored}, ctx, false)
 	if err != nil {
 		panic(err)
 	}
@@ -272,6 +277,7 @@ func testWatchOutput(t *testing.T, name string, in <-chan Event, expectedEvents 
 type fakeMatcher struct{ match string }
 
 func (fm fakeMatcher) ShouldIgnore(name string) bool {
+	l.Debugln("fakeMatcher:", fm.match, name)
 	return name == fm.match
 }
 

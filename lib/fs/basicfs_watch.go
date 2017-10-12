@@ -12,7 +12,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 
 	"github.com/zillode/notify"
 )
@@ -29,10 +28,10 @@ func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context
 	}
 
 	absShouldIgnore := func(absPath string) bool {
-		if !isInsideRoot(absPath, absName) {
+		relPath := f.unrooted(absPath)
+		if relPath == absPath {
 			panic("bug: Notify backend is processing a change outside of the watched path: " + absPath)
 		}
-		relPath, _ := filepath.Rel(absName, absPath)
 		return ignore.ShouldIgnore(relPath)
 	}
 
@@ -76,11 +75,10 @@ func (f *BasicFilesystem) watchLoop(name string, absName string, backendChan cha
 
 		select {
 		case ev := <-backendChan:
-			if !isInsideRoot(ev.Path(), absName) {
+			relPath := f.unrooted(ev.Path())
+			if relPath == ev.Path() {
 				panic("bug: BasicFilesystem watch received event outside of the watched path: " + ev.Path())
 			}
-			l.Debugln(f.Type(), f.URI(), "Watch: f.root:", f.root, "ev.Path():", ev.Path())
-			relPath, _ := filepath.Rel(f.root, ev.Path())
 			if ignore.ShouldIgnore(relPath) {
 				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
 				continue
@@ -107,11 +105,4 @@ func (f *BasicFilesystem) eventType(notifyType notify.Event) EventType {
 		return Remove
 	}
 	return NonRemove
-}
-
-// The added separator is necessary, as root has a separator attached while
-// path must be identical to the return value of filepath.Clean(path) (i.e.
-// does not have a separator attached).
-func isInsideRoot(path string, root string) bool {
-	return strings.HasPrefix(path+string(PathSeparator), root)
 }
