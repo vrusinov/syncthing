@@ -140,7 +140,7 @@ func TestWatchSubpath(t *testing.T) {
 		t.Errorf("Timed out before receiving expected event")
 		cancel()
 	case ev := <-outChan:
-		if ev.Name != "sub/file" {
+		if ev.Name != filepath.Join("sub", "file") {
 			t.Errorf("While watching a subfolder, received an event with unexpected path %v", ev.Name)
 		}
 	}
