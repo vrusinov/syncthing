@@ -227,12 +227,6 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 	if err := testFs.RemoveAll(name); err != nil {
 		panic(fmt.Sprintf("Failed to remove directory %s: %s", name, err))
 	}
-
-	// Without delay, tests fail with spurious error on windows on file
-	// operations in successive tests
-	if runtime.GOOS == "windows" {
-		sleepMs(500)
-	}
 }
 
 func testWatchOutput(t *testing.T, name string, in <-chan Event, expectedEvents []Event, allowOthers bool, ctx context.Context, cancel context.CancelFunc) {
