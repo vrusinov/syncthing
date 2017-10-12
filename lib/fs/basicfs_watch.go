@@ -28,11 +28,7 @@ func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context
 	}
 
 	absShouldIgnore := func(absPath string) bool {
-		relPath := f.unrooted(absPath)
-		if relPath == absPath {
-			panic("bug: Notify backend is processing a change outside of the watched path: " + absPath)
-		}
-		return ignore.ShouldIgnore(relPath)
+		return ignore.ShouldIgnore(f.unrootedChecked(absPath))
 	}
 
 	outChan := make(chan Event)
@@ -75,10 +71,7 @@ func (f *BasicFilesystem) watchLoop(name string, absName string, backendChan cha
 
 		select {
 		case ev := <-backendChan:
-			relPath := f.unrooted(ev.Path())
-			if relPath == ev.Path() {
-				panic("bug: BasicFilesystem watch received event outside of the watched path: " + ev.Path())
-			}
+			relPath := f.unrootedChecked(ev.Path())
 			if ignore.ShouldIgnore(relPath) {
 				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
 				continue
@@ -105,4 +98,19 @@ func (f *BasicFilesystem) eventType(notifyType notify.Event) EventType {
 		return Remove
 	}
 	return NonRemove
+}
+
+// unrootedChecked returns the path relative to the folder root (same as
+// unrooted). It panics if the given path is not a subpath and handles the
+// special case when the given path is the folder root without a trailing
+// pathseparator.
+func (f *BasicFilesystem) unrootedChecked(absPath string) string {
+	if absPath+string(PathSeparator) == f.root {
+		return "."
+	}
+	relPath := f.unrooted(absPath)
+	if relPath == absPath {
+		panic("bug: Notify backend is processing a change outside of the watched path: " + absPath)
+	}
+	return relPath
 }

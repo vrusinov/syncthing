@@ -127,11 +127,7 @@ func (f *BasicFilesystem) rooted(rel string) (string, error) {
 }
 
 func (f *BasicFilesystem) unrooted(path string) string {
-	pathSep := string(PathSeparator)
-	if strings.HasSuffix(path, pathSep) {
-		return strings.TrimPrefix(strings.TrimPrefix(path, f.root), string(PathSeparator))
-	}
-	return filepath.Clean(strings.TrimPrefix(strings.TrimPrefix(path+pathSep, f.root), string(PathSeparator)))
+	return strings.TrimPrefix(strings.TrimPrefix(path, f.root), string(PathSeparator))
 }
 
 func (f *BasicFilesystem) Chmod(name string, mode FileMode) error {

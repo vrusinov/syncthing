@@ -277,7 +277,6 @@ func testWatchOutput(t *testing.T, name string, in <-chan Event, expectedEvents 
 type fakeMatcher struct{ match string }
 
 func (fm fakeMatcher) ShouldIgnore(name string) bool {
-	l.Debugln("fakeMatcher:", fm.match, name)
 	return name == fm.match
 }
 
