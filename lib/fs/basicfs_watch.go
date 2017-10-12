@@ -79,6 +79,7 @@ func (f *BasicFilesystem) watchLoop(name string, absName string, backendChan cha
 			if !isInsideRoot(ev.Path(), absName) {
 				panic("bug: BasicFilesystem watch received event outside of the watched path: " + ev.Path())
 			}
+			l.Debugln(f.Type(), f.URI(), "Watch: f.root:", relPath, "ev.Path():", ev.Path())
 			relPath, _ := filepath.Rel(f.root, ev.Path())
 			if ignore.ShouldIgnore(relPath) {
 				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
