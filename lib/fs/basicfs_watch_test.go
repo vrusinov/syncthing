@@ -190,6 +190,14 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 		panic(fmt.Sprintf("Failed to create directory %s: %s", name, err))
 	}
 
+	// Tests pick up the previously created files/dirs, probably because
+	// they get flushed to disk with a delay.
+	initDelayMs := 500
+	if runtime.GOOS == "darwin" {
+		initDelayMs = 900
+	}
+	sleepMs(initDelayMs)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	eventChan, err := testFs.Watch(name, fakeMatcher{filepath.Join(name, ignored)}, ctx, false)
