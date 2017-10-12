@@ -134,9 +134,15 @@ func TestWatchSubpath(t *testing.T) {
 
 	backendChan <- fakeEventInfo(filepath.Join(testDirAbs, "sub", "file"))
 
-	ev := <-outChan
-	if ev.Name != "sub/file" {
-		t.Errorf("While watching a subfolder, received an event with unexpected path %v", ev.Name)
+	timeout := time.NewTimer(2 * time.Second)
+	select {
+	case <-timeout.C:
+		t.Errorf("Timed out before receiving expected event")
+		cancel()
+	case ev := <-outChan:
+		if ev.Name != "sub/file" {
+			t.Errorf("While watching a subfolder, received an event with unexpected path %v", ev.Name)
+		}
 	}
 
 	cancel()
