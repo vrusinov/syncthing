@@ -52,12 +52,12 @@ func (f *BasicFilesystem) Watch(name string, ignore Matcher, ctx context.Context
 		return nil, err
 	}
 
-	go f.watchLoop(absName, backendChan, outChan, ignore, ctx)
+	go f.watchLoop(name, absName, backendChan, outChan, ignore, ctx)
 
 	return outChan, nil
 }
 
-func (f *BasicFilesystem) watchLoop(absName string, backendChan chan notify.EventInfo, outChan chan<- Event, ignore Matcher, ctx context.Context) {
+func (f *BasicFilesystem) watchLoop(name string, absName string, backendChan chan notify.EventInfo, outChan chan<- Event, ignore Matcher, ctx context.Context) {
 	for {
 		// Detect channel overflow
 		if len(backendChan) == backendBuffer {
@@ -70,7 +70,7 @@ func (f *BasicFilesystem) watchLoop(absName string, backendChan chan notify.Even
 				}
 			}
 			// When next scheduling a scan, do it on the entire folder as events have been lost.
-			outChan <- Event{Name: ".", Type: NonRemove}
+			outChan <- Event{Name: name, Type: NonRemove}
 			l.Debugln(f.Type(), f.URI(), "Watch: Event overflow, send \".\"")
 		}
 
@@ -79,7 +79,7 @@ func (f *BasicFilesystem) watchLoop(absName string, backendChan chan notify.Even
 			if !isInsideRoot(ev.Path(), absName) {
 				panic("bug: BasicFilesystem watch received event outside of the watched path: " + ev.Path())
 			}
-			relPath, _ := filepath.Rel(absName, ev.Path())
+			relPath, _ := filepath.Rel(f.root, ev.Path())
 			if ignore.ShouldIgnore(relPath) {
 				l.Debugln(f.Type(), f.URI(), "Watch: Ignoring", relPath)
 				continue

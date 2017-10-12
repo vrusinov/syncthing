@@ -57,29 +57,31 @@ var (
 )
 
 func TestWatchIgnore(t *testing.T) {
+	name := "ignore"
+
 	file := "file"
 	ignored := "ignored"
 
 	testCase := func() {
-		createTestFile(t, file)
-		createTestFile(t, ignored)
+		createTestFile(name, file)
+		createTestFile(name, ignored)
 	}
 
 	expectedEvents := []Event{
 		{file, NonRemove},
 	}
 
-	testScenario(t, "Ignore", testCase, expectedEvents, false, ignored)
+	testScenario(t, name, testCase, expectedEvents, false, ignored)
 }
 
 func TestWatchRename(t *testing.T) {
-	old := createTestFile(t, "oldfile")
+	name := "rename"
+
+	old := createTestFile(name, "oldfile")
 	new := "newfile"
 
 	testCase := func() {
-		if err := testFs.Rename(old, new); err != nil {
-			panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
-		}
+		renameTestFile(name, old, new)
 	}
 
 	destEvent := Event{new, Remove}
@@ -93,7 +95,7 @@ func TestWatchRename(t *testing.T) {
 		destEvent,
 	}
 
-	testScenario(t, "Rename", testCase, expectedEvents, false, "")
+	testScenario(t, name, testCase, expectedEvents, false, "")
 }
 
 // TestWatchOutside checks that no changes from outside the folder make it in
@@ -103,6 +105,9 @@ func TestWatchOutside(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// testFs is Filesystem, but we need BasicFilesystem here
+	fs := newBasicFilesystem(testDirAbs)
+
 	go func() {
 		defer func() {
 			if recover() == nil {
@@ -110,17 +115,40 @@ func TestWatchOutside(t *testing.T) {
 			}
 			cancel()
 		}()
-		testFs.(*BasicFilesystem).watchLoop(testDirAbs, backendChan, outChan, fakeMatcher{}, ctx)
+		fs.watchLoop(".", testDirAbs, backendChan, outChan, fakeMatcher{}, ctx)
 	}()
 
 	backendChan <- fakeEventInfo(filepath.Join(filepath.Dir(testDirAbs), "outside"))
 }
 
+func TestWatchSubpath(t *testing.T) {
+	outChan := make(chan Event)
+	backendChan := make(chan notify.EventInfo, backendBuffer)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// testFs is Filesystem, but we need BasicFilesystem here
+	fs := newBasicFilesystem(testDirAbs)
+
+	go fs.watchLoop("sub", filepath.Join(testDirAbs, "sub"), backendChan, outChan, fakeMatcher{}, ctx)
+
+	backendChan <- fakeEventInfo(filepath.Join(testDirAbs, "sub", "file"))
+
+	ev := <-outChan
+	if ev.Name != "sub/file" {
+		t.Errorf("While watching a subfolder, received an event with unexpected path %v", ev.Name)
+	}
+
+	cancel()
+}
+
 // TestWatchOverflow checks that an event at the root is sent when maxFiles is reached
 func TestWatchOverflow(t *testing.T) {
+	name := "overflow"
+
 	testCase := func() {
 		for i := 0; i < 5*backendBuffer; i++ {
-			createTestFile(t, "file"+strconv.Itoa(i))
+			createTestFile(name, "file"+strconv.Itoa(i))
 		}
 	}
 
@@ -128,27 +156,29 @@ func TestWatchOverflow(t *testing.T) {
 		{".", NonRemove},
 	}
 
-	testScenario(t, "Overflow", testCase, expectedEvents, true, "")
-}
-
-func createTestDir(t *testing.T, dir string) string {
-	if err := testFs.MkdirAll(dir, 0755); err != nil {
-		panic(fmt.Sprintf("Failed to create directory %s: %s", dir, err))
-	}
-	return dir
+	testScenario(t, name, testCase, expectedEvents, true, "")
 }
 
 // path relative to folder root, also creates parent dirs if necessary
-func createTestFile(t *testing.T, file string) string {
-	if err := testFs.MkdirAll(filepath.Dir(file), 0755); err != nil {
-		panic(fmt.Sprintf("Failed to create parent directory for %s: %s", file, err))
+func createTestFile(name string, file string) string {
+	joined := filepath.Join(name, file)
+	if err := testFs.MkdirAll(filepath.Dir(joined), 0755); err != nil {
+		panic(fmt.Sprintf("Failed to create parent directory for %s: %s", joined, err))
 	}
-	handle, err := testFs.Create(file)
+	handle, err := testFs.Create(joined)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to create test file %s: %s", file, err))
+		panic(fmt.Sprintf("Failed to create test file %s: %s", joined, err))
 	}
 	handle.Close()
 	return file
+}
+
+func renameTestFile(name string, old string, new string) {
+	old = filepath.Join(name, old)
+	new = filepath.Join(name, new)
+	if err := testFs.Rename(old, new); err != nil {
+		panic(fmt.Sprintf("Failed to rename %s to %s: %s", old, new, err))
+	}
 }
 
 func sleepMs(ms int) {
@@ -156,24 +186,18 @@ func sleepMs(ms int) {
 }
 
 func testScenario(t *testing.T, name string, testCase func(), expectedEvents []Event, allowOthers bool, ignored string) {
-	createTestDir(t, ".")
-
-	// Tests pick up the previously created files/dirs, probably because
-	// they get flushed to disk with a delay.
-	initDelayMs := 500
-	if runtime.GOOS == "darwin" {
-		initDelayMs = 900
+	if err := testFs.MkdirAll(name, 0755); err != nil {
+		panic(fmt.Sprintf("Failed to create directory %s: %s", name, err))
 	}
-	sleepMs(initDelayMs)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	eventChan, err := testFs.Watch(".", fakeMatcher{ignored}, ctx, false)
+	eventChan, err := testFs.Watch(name, fakeMatcher{filepath.Join(name, ignored)}, ctx, false)
 	if err != nil {
 		panic(err)
 	}
 
-	go testWatchOutput(t, eventChan, expectedEvents, allowOthers, ctx, cancel)
+	go testWatchOutput(t, name, eventChan, expectedEvents, allowOthers, ctx, cancel)
 
 	timeout := time.NewTimer(2 * time.Second)
 
@@ -186,7 +210,9 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 	case <-ctx.Done():
 	}
 
-	os.RemoveAll(testDir)
+	if err := testFs.RemoveAll(name); err != nil {
+		panic(fmt.Sprintf("Failed to remove directory %s: %s", name, err))
+	}
 
 	// Without delay, tests fail with spurious error on windows on file
 	// operations in successive tests
@@ -195,9 +221,10 @@ func testScenario(t *testing.T, name string, testCase func(), expectedEvents []E
 	}
 }
 
-func testWatchOutput(t *testing.T, in <-chan Event, expectedEvents []Event, allowOthers bool, ctx context.Context, cancel context.CancelFunc) {
+func testWatchOutput(t *testing.T, name string, in <-chan Event, expectedEvents []Event, allowOthers bool, ctx context.Context, cancel context.CancelFunc) {
 	var expected = make(map[Event]struct{})
 	for _, ev := range expectedEvents {
+		ev.Name = filepath.Join(name, ev.Name)
 		expected[ev] = struct{}{}
 	}
 
