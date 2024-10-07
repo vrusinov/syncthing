@@ -5,7 +5,7 @@ require (
 	github.com/AudriusButkevicius/recli v0.0.6
 	github.com/alecthomas/kong v0.2.16
 	github.com/bkaradzic/go-lz4 v0.0.0-20160924222819-7224d8d8f27e
-	github.com/calmh/xdr v1.1.0
+	github.com/calmh/xdr v1.2.0
 	github.com/ccding/go-stun v0.1.3
 	github.com/certifi/gocertifi v0.0.0-20210429200110-83314bf6d27c // indirect
 	github.com/chmduquesne/rollinghash v0.0.0-20180912150627-a60f8e7142b5
