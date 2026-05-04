@@ -7,14 +7,11 @@ require (
 	github.com/bkaradzic/go-lz4 v0.0.0-20160924222819-7224d8d8f27e
 	github.com/calmh/xdr v1.1.0
 	github.com/ccding/go-stun v0.1.3
-	github.com/certifi/gocertifi v0.0.0-20210429200110-83314bf6d27c // indirect
 	github.com/chmduquesne/rollinghash v0.0.0-20180912150627-a60f8e7142b5
-	github.com/cpuguy83/go-md2man/v2 v2.0.0 // indirect
 	github.com/d4l3k/messagediff v1.2.1
 	github.com/dchest/siphash v1.2.2
 	github.com/flynn-archive/go-shlex v0.0.0-20150515145356-3f9db97f8568
 	github.com/getsentry/raven-go v0.2.0
-	github.com/go-asn1-ber/asn1-ber v1.5.3 // indirect
 	github.com/go-ldap/ldap/v3 v3.3.0
 	github.com/gobwas/glob v0.2.3
 	github.com/gogo/protobuf v1.3.2
@@ -22,11 +19,10 @@ require (
 	github.com/golang/protobuf v1.5.2
 	github.com/greatroar/blobloom v0.7.0
 	github.com/hashicorp/golang-lru v0.5.4
-	github.com/jackpal/gateway v1.0.7
+	github.com/jackpal/gateway v1.2.0
 	github.com/jackpal/go-nat-pmp v1.0.2
 	github.com/julienschmidt/httprouter v1.3.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
-	github.com/klauspost/cpuid/v2 v2.0.6 // indirect
 	github.com/lib/pq v1.10.1
 	github.com/lucas-clemente/quic-go v0.19.3
 	github.com/maruel/panicparse v1.6.1
@@ -34,11 +30,9 @@ require (
 	github.com/minio/sha256-simd v1.0.0
 	github.com/miscreant/miscreant.go v0.0.0-20200214223636-26d376326b75
 	github.com/oschwald/geoip2-golang v1.5.0
-	github.com/petermattis/goid v0.0.0-20180202154549-b0b1615b78e5 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.10.0
 	github.com/rcrowley/go-metrics v0.0.0-20201227073835-cf1acfcdf475
-	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/sasha-s/go-deadlock v0.2.0
 	github.com/shirou/gopsutil/v3 v3.21.4
 	github.com/syncthing/notify v0.0.0-20210308121556-f45149b04939
@@ -46,12 +40,39 @@ require (
 	github.com/thejerf/suture/v4 v4.0.1
 	github.com/urfave/cli v1.22.5
 	github.com/vitrun/qart v0.0.0-20160531060029-bf64b92db6b0
-	golang.org/x/crypto v0.0.0-20210421170649-83a5a9bb288b
-	golang.org/x/net v0.0.0-20210428140749-89ef3d95e781
-	golang.org/x/sys v0.0.0-20210426230700-d19ff857e887
-	golang.org/x/text v0.3.6
+	golang.org/x/crypto v0.48.0
+	golang.org/x/net v0.50.0
+	golang.org/x/sys v0.41.0
+	golang.org/x/text v0.34.0
 	golang.org/x/time v0.0.0-20210220033141-f8bda1e9f3ba
-	golang.org/x/tools v0.1.0
+	golang.org/x/tools v0.41.0
 )
 
-go 1.14
+require (
+	github.com/Azure/go-ntlmssp v0.0.0-20200615164410-66371956d46c // indirect
+	github.com/StackExchange/wmi v0.0.0-20190523213315-cbe66965904d // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/certifi/gocertifi v0.0.0-20210429200110-83314bf6d27c // indirect
+	github.com/cespare/xxhash/v2 v2.1.1 // indirect
+	github.com/cheekybits/genny v1.0.0 // indirect
+	github.com/cpuguy83/go-md2man/v2 v2.0.0 // indirect
+	github.com/go-asn1-ber/asn1-ber v1.5.3 // indirect
+	github.com/go-ole/go-ole v1.2.4 // indirect
+	github.com/golang/snappy v0.0.1 // indirect
+	github.com/klauspost/cpuid/v2 v2.0.6 // indirect
+	github.com/marten-seemann/qtls v0.10.0 // indirect
+	github.com/marten-seemann/qtls-go1-15 v0.1.4 // indirect
+	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/oschwald/maxminddb-golang v1.8.0 // indirect
+	github.com/petermattis/goid v0.0.0-20180202154549-b0b1615b78e5 // indirect
+	github.com/prometheus/client_model v0.2.0 // indirect
+	github.com/prometheus/common v0.18.0 // indirect
+	github.com/prometheus/procfs v0.6.0 // indirect
+	github.com/russross/blackfriday/v2 v2.1.0 // indirect
+	golang.org/x/mod v0.32.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260109210033-bd525da824e2 // indirect
+	google.golang.org/protobuf v1.26.0 // indirect
+)
+
+go 1.26.2
